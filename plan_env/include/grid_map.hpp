@@ -1,10 +1,24 @@
 #include <Eigen/Eigen>
-#include <pcl/PCLPointCloud2.h>
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
+#if __has_include(<tf2_ros/buffer.hpp>)
+#include <tf2_ros/buffer.hpp>
+#else
+#include <tf2_ros/buffer.h>
+#endif
+#if __has_include(<tf2_ros/transform_listener.hpp>)
+#include <tf2_ros/transform_listener.hpp>
+#else
+#include <tf2_ros/transform_listener.h>
+#endif
 
 #include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -33,10 +47,8 @@ struct EsdfVoxel {
 };
 enum class OccupancyState { FREE, OCCUPIED, UNKNOWN };
 
-struct GridMapSnapshot {
+struct EsdfSnapshot {
   GridGeometry geometry;
-  std::vector<TsdfVoxel> tsdf_voxels;
-  std::vector<OccupancyVoxel> occupancy_voxels;
   std::vector<EsdfVoxel> esdf_voxels;
   uint64_t version = 0;
 };
@@ -47,17 +59,18 @@ public:
   ~GridMap();
 
   GridMap(const GridMap &) = delete;
-  GridMap & operator=(const GridMap &) = delete;
+  GridMap &operator=(const GridMap &) = delete;
 
-  // Called by the ROS subscription callback after converting its message to PCL.
-  bool pointCloudCallback(pcl::PCLPointCloud2::ConstPtr cloud);
+  bool pointCloudCallback(
+      const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud);
 
-  std::shared_ptr<const GridMapSnapshot> snapshot() const;
+  std::shared_ptr<const EsdfSnapshot> snapshot() const;
 
 private:
   void mappingLoop();
-  void processPointCloud(const pcl::PCLPointCloud2::ConstPtr & cloud);
-  void publishSnapshot();
+  void processPointCloud(
+      const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud);
+  void publishEsdfSnapshot();
 
   GridGeometry grid_geometry_;
 
@@ -66,28 +79,34 @@ private:
 
   std::vector<EsdfVoxel> esdf_voxels_;
 
+  // Points retained by processPointCloud are expressed in map_frame_.
+  std::vector<Eigen::Vector3f> cloud_points_;
+  Eigen::Vector3f camera_position_ = Eigen::Vector3f::Zero();
+  const std::string map_frame_ = "map";
+  std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
+  std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
+
   std::mutex pending_cloud_mutex_;
   std::condition_variable pending_cloud_cv_;
-  pcl::PCLPointCloud2::ConstPtr pending_cloud_;
+  sensor_msgs::msg::PointCloud2::ConstSharedPtr pending_cloud_;
   bool stopping_ = false;
   std::thread mapping_thread_;
 
   uint64_t snapshot_version_ = 0;
-  std::shared_ptr<const GridMapSnapshot> latest_snapshot_;
+  std::shared_ptr<const EsdfSnapshot> latest_esdf_snapshot_;
 
   inline int toAddress(const Eigen::Vector3i &id);
   inline int toAddress(int x, int y, int z);
   inline int toAddress2d(int x, int y);
   inline void boundIndex(Eigen::Vector3i &id);
   inline void boundIndex(Eigen::Vector2i &id);
-
 };
 /* ============================== definition of inline function
  * ============================== */
 
 inline int GridMap::toAddress(const Eigen::Vector3i &id) {
-  return id(0) * grid_geometry_.size_x * grid_geometry_.size_y +
-         id(1) * grid_geometry_.size_y + id(2);
+  return id(0) * grid_geometry_.size_y * grid_geometry_.size_z +
+         id(1) * grid_geometry_.size_z + id(2);
 }
 
 inline int GridMap::toAddress(int x, int y, int z) {
