@@ -27,35 +27,23 @@
 
 namespace {
 
-constexpr double kDefaultDistance = 10000.0;
-
-bool shouldClearOnRayStaleOccupied(const int hit_count, const int miss_count,
-                                   const int min_miss) {
-  return hit_count == 0 && miss_count >= min_miss;
-}
-
-bool pointInPolygonXy(double x, double y,
-                      const std::vector<Eigen::Vector2d> &poly) {
-  const int n = static_cast<int>(poly.size());
-  if (n < 3) {
-    return false;
-  }
-  bool inside = false;
-  for (int i = 0, j = n - 1; i < n; j = i++) {
-    const double yi = poly[static_cast<size_t>(i)].y();
-    const double yj = poly[static_cast<size_t>(j)].y();
-    const bool intersect = ((yi > y) != (yj > y));
-    if (!intersect) {
+std::vector<Eigen::Vector2d> cleanPolygon(
+    const std::vector<Eigen::Vector2d> &polygon) {
+  std::vector<Eigen::Vector2d> result;
+  result.reserve(polygon.size());
+  for (const auto &point : polygon) {
+    if (!std::isfinite(point.x()) || !std::isfinite(point.y())) {
       continue;
     }
-    const double xi = poly[static_cast<size_t>(i)].x();
-    const double xj = poly[static_cast<size_t>(j)].x();
-    const double den = yj - yi;
-    if (x < (xj - xi) * (y - yi) / den + xi) {
-      inside = !inside;
+    if (!result.empty() && (point - result.back()).squaredNorm() < 1e-12) {
+      continue;
     }
+    result.push_back(point);
   }
-  return inside;
+  if (result.size() > 1 && (result.front() - result.back()).squaredNorm() < 1e-12) {
+    result.pop_back();
+  }
+  return result;
 }
 
 } // namespace
@@ -78,6 +66,161 @@ GridMap::~GridMap() {
   if (mapping_thread_.joinable()) {
     mapping_thread_.join();
   }
+}
+
+bool GridMap::configure(const float resolution, const float map_size_z,
+                        const float expansion_margin,
+                        const float expansion_ratio) {
+  if (!std::isfinite(resolution) || resolution <= 0.0f ||
+      !std::isfinite(map_size_z) || map_size_z <= 0.0f ||
+      !std::isfinite(expansion_margin) || expansion_margin < 0.0f ||
+      !std::isfinite(expansion_ratio) || expansion_ratio < 0.0f) {
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(task_region_mutex_);
+  if (task_region_.valid) {
+    return false;
+  }
+  resolution_ = resolution;
+  map_size_z_ = map_size_z;
+  expansion_margin_ = expansion_margin;
+  expansion_ratio_ = expansion_ratio;
+  return true;
+}
+
+bool GridMap::startTaskMapping(const std::vector<Eigen::Vector2d> &polygon_xy,
+                               std::string *message_out) {
+  const auto polygon = cleanPolygon(polygon_xy);
+  if (polygon.size() < 3) {
+    if (message_out) {
+      *message_out = "task polygon needs at least 3 finite unique vertices";
+    }
+    return false;
+  }
+  double center_x = 0.0;
+  double center_y = 0.0;
+  for (const auto &point : polygon) {
+    center_x += point.x();
+    center_y += point.y();
+  }
+  center_x /= static_cast<double>(polygon.size());
+  center_y /= static_cast<double>(polygon.size());
+  return startTaskMappingWithCenter(center_x, center_y, polygon, message_out);
+}
+
+bool GridMap::startTaskMapping(const double center_x, const double center_y,
+                               const std::vector<Eigen::Vector2d> &polygon_xy,
+                               std::string *message_out) {
+  return startTaskMappingWithCenter(center_x, center_y, cleanPolygon(polygon_xy),
+                                    message_out);
+}
+
+bool GridMap::startTaskMappingWithCenter(
+    const double center_x, const double center_y,
+    const std::vector<Eigen::Vector2d> &polygon_xy,
+    std::string *message_out) {
+  if (polygon_xy.size() < 3 || !std::isfinite(center_x) ||
+      !std::isfinite(center_y)) {
+    if (message_out) {
+      *message_out = "invalid task polygon or center";
+    }
+    return false;
+  }
+
+  double min_x = std::numeric_limits<double>::infinity();
+  double min_y = std::numeric_limits<double>::infinity();
+  double max_x = -std::numeric_limits<double>::infinity();
+  double max_y = -std::numeric_limits<double>::infinity();
+  for (const auto &point : polygon_xy) {
+    min_x = std::min(min_x, point.x());
+    min_y = std::min(min_y, point.y());
+    max_x = std::max(max_x, point.x());
+    max_y = std::max(max_y, point.y());
+  }
+
+  std::lock_guard<std::mutex> lock(task_region_mutex_);
+  const double width = std::max(max_x - min_x, static_cast<double>(resolution_));
+  const double height = std::max(max_y - min_y, static_cast<double>(resolution_));
+  const double expand_x = std::max(static_cast<double>(expansion_margin_),
+                                   width * static_cast<double>(expansion_ratio_));
+  const double expand_y = std::max(static_cast<double>(expansion_margin_),
+                                   height * static_cast<double>(expansion_ratio_));
+  const double expanded_width = width + 2.0 * expand_x;
+  const double expanded_height = height + 2.0 * expand_y;
+
+  task_region_ = TaskRegion{};
+  task_region_.valid = true;
+  task_region_.center = Eigen::Vector2f(static_cast<float>(center_x),
+                                        static_cast<float>(center_y));
+  task_region_.min = Eigen::Vector2f(static_cast<float>(center_x - expanded_width * 0.5),
+                                     static_cast<float>(center_y - expanded_height * 0.5));
+  task_region_.max = Eigen::Vector2f(static_cast<float>(center_x + expanded_width * 0.5),
+                                     static_cast<float>(center_y + expanded_height * 0.5));
+  task_region_.z_min = 0.0f;
+  task_region_.z_max = map_size_z_;
+  task_region_.expansion_margin = expansion_margin_;
+  task_region_.expansion_ratio = expansion_ratio_;
+  task_region_.source_polygon = polygon_xy;
+  task_region_.expanded_polygon = {
+      {task_region_.min.x(), task_region_.min.y()},
+      {task_region_.max.x(), task_region_.min.y()},
+      {task_region_.max.x(), task_region_.max.y()},
+      {task_region_.min.x(), task_region_.max.y()}};
+
+  grid_geometry_.resolution = resolution_;
+  grid_geometry_.origin = Eigen::Vector3f(task_region_.min.x(), task_region_.min.y(),
+                                          task_region_.z_min);
+  grid_geometry_.size_x = std::max(1, static_cast<int>(std::ceil(expanded_width / resolution_)));
+  grid_geometry_.size_y = std::max(1, static_cast<int>(std::ceil(expanded_height / resolution_)));
+  grid_geometry_.size_z = std::max(1, static_cast<int>(std::ceil(map_size_z_ / resolution_)));
+  clearMappingBuffers();
+  const size_t voxel_count = static_cast<size_t>(grid_geometry_.size_x) *
+                             static_cast<size_t>(grid_geometry_.size_y) *
+                             static_cast<size_t>(grid_geometry_.size_z);
+  tsdf_voxels_.assign(voxel_count, TsdfVoxel{});
+  occupancy_voxels_.assign(voxel_count, OccupancyVoxel{});
+  esdf_voxels_.assign(voxel_count, EsdfVoxel{});
+  cloud_points_.clear();
+
+  if (message_out) {
+    std::ostringstream stream;
+    stream << "task ROI started: center=[" << center_x << ", " << center_y
+           << "] source_vertices=" << polygon_xy.size() << " expanded=["
+           << task_region_.min.x() << ", " << task_region_.min.y() << "]..["
+           << task_region_.max.x() << ", " << task_region_.max.y() << "] map_voxels=["
+           << grid_geometry_.size_x << ", " << grid_geometry_.size_y << ", "
+           << grid_geometry_.size_z << "]";
+    *message_out = stream.str();
+  }
+  return true;
+}
+
+void GridMap::stopTaskMapping() {
+  std::lock_guard<std::mutex> lock(task_region_mutex_);
+  task_region_ = TaskRegion{};
+  clearMappingBuffers();
+  grid_geometry_ = GridGeometry{};
+}
+
+bool GridMap::isTaskMappingActive() const {
+  std::lock_guard<std::mutex> lock(task_region_mutex_);
+  return task_region_.valid;
+}
+
+TaskRegion GridMap::taskRegion() const {
+  std::lock_guard<std::mutex> lock(task_region_mutex_);
+  return task_region_;
+}
+
+bool GridMap::pointInTaskRegion(const float x, const float y, const float z) const {
+  std::lock_guard<std::mutex> lock(task_region_mutex_);
+  return task_region_.contains(x, y, z);
+}
+
+void GridMap::clearMappingBuffers() {
+  tsdf_voxels_.clear();
+  occupancy_voxels_.clear();
+  esdf_voxels_.clear();
 }
 
 bool GridMap::pointCloudCallback(
@@ -126,6 +269,7 @@ void GridMap::processPointCloud(
     return;
   }
 
+  // 转pcl并过滤无效点
   pcl::PointCloud<pcl::PointXYZ> input_cloud;
   pcl::fromROSMsg(*cloud, input_cloud);
   pcl::PointCloud<pcl::PointXYZ>::Ptr finite_cloud(
@@ -181,6 +325,7 @@ void GridMap::processPointCloud(
       static_cast<float>(translation.x), static_cast<float>(translation.y),
       static_cast<float>(translation.z));
 
+  const TaskRegion region = taskRegion();
   std::vector<Eigen::Vector3f> transformed_points;
   transformed_points.reserve(filtered_cloud.points.size());
   for (const auto &point : filtered_cloud.points) {
@@ -191,7 +336,11 @@ void GridMap::processPointCloud(
         point_camera.norm() <= kCloudMinRange) {
       continue;
     }
-    transformed_points.push_back(rotation_matrix * point_camera + translation_vector);
+    const Eigen::Vector3f point_map = rotation_matrix * point_camera + translation_vector;
+    if (region.valid && !region.contains(point_map.x(), point_map.y(), point_map.z())) {
+      continue;
+    }
+    transformed_points.push_back(point_map);
   }
   cloud_points_ = std::move(transformed_points);
   camera_position_ = translation_vector;
@@ -201,11 +350,78 @@ void GridMap::publishEsdfSnapshot() {
   auto next = std::make_shared<EsdfSnapshot>();
   next->geometry = grid_geometry_;
   next->esdf_voxels = esdf_voxels_;
+  const TaskRegion region = taskRegion();
+  next->task_mapping_active = region.valid;
+  next->task_roi_polygon = region.expanded_polygon;
   next->version = ++snapshot_version_;
   std::atomic_store(&latest_esdf_snapshot_,
                     std::shared_ptr<const EsdfSnapshot>(std::move(next)));
 }
 
-int main() {
+int main(int argc, char **argv) {
+  rclcpp::init(argc, argv);
+  auto node = std::make_shared<rclcpp::Node>(
+      "new_grid_map", rclcpp::NodeOptions().automatically_declare_parameters_from_overrides(true));
+
+  const auto get_or_declare_double =
+      [&node](const std::string &name, const double default_value) {
+        if (!node->has_parameter(name)) {
+          node->declare_parameter<double>(name, default_value);
+        }
+        return node->get_parameter(name).as_double();
+      };
+  const auto get_or_declare_string =
+      [&node](const std::string &name, const std::string &default_value) {
+        if (!node->has_parameter(name)) {
+          node->declare_parameter<std::string>(name, default_value);
+        }
+        return node->get_parameter(name).as_string();
+      };
+  const auto get_or_declare_double_array =
+      [&node](const std::string &name) {
+        if (!node->has_parameter(name)) {
+          node->declare_parameter<std::vector<double>>(name, std::vector<double>{});
+        }
+        return node->get_parameter(name).as_double_array();
+      };
+
+  auto grid_map = std::make_shared<GridMap>();
+  const auto resolution = get_or_declare_double("grid_map.resolution", 0.05);
+  const auto map_size_z = get_or_declare_double("grid_map.map_size_z", 0.60);
+  const auto expansion_margin =
+      get_or_declare_double("grid_map.task_roi_expansion_margin", 0.25);
+  const auto expansion_ratio =
+      get_or_declare_double("grid_map.task_roi_expansion_ratio", 0.10);
+  if (!grid_map->configure(static_cast<float>(resolution), static_cast<float>(map_size_z),
+                           static_cast<float>(expansion_margin), static_cast<float>(expansion_ratio))) {
+    RCLCPP_FATAL(node->get_logger(), "invalid GridMap configuration");
+    rclcpp::shutdown();
+    return 1;
+  }
+
+  const auto polygon_values = get_or_declare_double_array("grid_map.task_polygon_xy");
+  if (polygon_values.size() >= 6 && polygon_values.size() % 2 == 0) {
+    std::vector<Eigen::Vector2d> polygon;
+    polygon.reserve(polygon_values.size() / 2);
+    for (size_t i = 0; i < polygon_values.size(); i += 2) {
+      polygon.emplace_back(polygon_values[i], polygon_values[i + 1]);
+    }
+    std::string message;
+    if (!grid_map->startTaskMapping(polygon, &message)) {
+      RCLCPP_ERROR(node->get_logger(), "failed to start task ROI: %s", message.c_str());
+    } else {
+      RCLCPP_INFO(node->get_logger(), "%s", message.c_str());
+    }
+  }
+
+  const auto cloud_topic = get_or_declare_string("grid_map.cloud_topic", "grid_map/cloud");
+  auto cloud_sub = node->create_subscription<sensor_msgs::msg::PointCloud2>(
+      cloud_topic, rclcpp::SensorDataQoS(),
+      [grid_map](const sensor_msgs::msg::PointCloud2::ConstSharedPtr message) {
+        grid_map->pointCloudCallback(message);
+      });
+  (void)cloud_sub;
+  rclcpp::spin(node);
+  rclcpp::shutdown();
   return 0;
 }

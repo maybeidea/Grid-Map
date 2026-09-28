@@ -16,6 +16,7 @@
 
 #include <condition_variable>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -50,7 +51,28 @@ enum class OccupancyState { FREE, OCCUPIED, UNKNOWN };
 struct EsdfSnapshot {
   GridGeometry geometry;
   std::vector<EsdfVoxel> esdf_voxels;
+  // The same expanded XY rectangle is used as the task ROI and map window.
+  std::vector<Eigen::Vector2f> task_roi_polygon;
+  bool task_mapping_active = false;
   uint64_t version = 0;
+};
+
+struct TaskRegion {
+  bool valid = false;
+  Eigen::Vector2f center = Eigen::Vector2f::Zero();
+  Eigen::Vector2f min = Eigen::Vector2f::Zero();
+  Eigen::Vector2f max = Eigen::Vector2f::Zero();
+  float z_min = 0.0f;
+  float z_max = 0.0f;
+  float expansion_margin = 0.0f;
+  float expansion_ratio = 0.0f;
+  std::vector<Eigen::Vector2d> source_polygon;
+  std::vector<Eigen::Vector2f> expanded_polygon;
+
+  bool contains(float x, float y, float z) const {
+    return valid && x >= min.x() && x <= max.x() && y >= min.y() &&
+           y <= max.y() && z >= z_min && z <= z_max;
+  }
 };
 
 class GridMap {
@@ -61,8 +83,29 @@ public:
   GridMap(const GridMap &) = delete;
   GridMap &operator=(const GridMap &) = delete;
 
+  // Library initialization performed by the owning ROS node.
+  void initMap(rclcpp::Node::SharedPtr node);
+
   bool pointCloudCallback(
       const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud);
+
+  // Configure the voxel map before starting a task. The task ROI is supplied
+  // later through startTaskMapping(), so one GridMap instance can be reused.
+  bool configure(float resolution, float map_size_z,
+                 float expansion_margin = 0.25f,
+                 float expansion_ratio = 0.10f);
+
+  // Record a task polygon and derive one expanded rectangular ROI. This same
+  // rectangle becomes both the map window and the ESDF/task ROI.
+  bool startTaskMapping(const std::vector<Eigen::Vector2d> &polygon_xy,
+                        std::string *message_out = nullptr);
+  bool startTaskMapping(double center_x, double center_y,
+                        const std::vector<Eigen::Vector2d> &polygon_xy,
+                        std::string *message_out = nullptr);
+  void stopTaskMapping();
+  bool isTaskMappingActive() const;
+  TaskRegion taskRegion() const;
+  bool pointInTaskRegion(float x, float y, float z) const;
 
   std::shared_ptr<const EsdfSnapshot> snapshot() const;
 
@@ -71,6 +114,10 @@ private:
   void processPointCloud(
       const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud);
   void publishEsdfSnapshot();
+  bool startTaskMappingWithCenter(double center_x, double center_y,
+                                  const std::vector<Eigen::Vector2d> &polygon_xy,
+                                  std::string *message_out);
+  void clearMappingBuffers();
 
   GridGeometry grid_geometry_;
 
@@ -79,10 +126,19 @@ private:
 
   std::vector<EsdfVoxel> esdf_voxels_;
 
+  mutable std::mutex task_region_mutex_;
+  TaskRegion task_region_;
+  float resolution_ = 0.05f;
+  float map_size_z_ = 0.60f;
+  float expansion_margin_ = 0.25f;
+  float expansion_ratio_ = 0.10f;
+
   // Points retained by processPointCloud are expressed in map_frame_.
   std::vector<Eigen::Vector3f> cloud_points_;
   Eigen::Vector3f camera_position_ = Eigen::Vector3f::Zero();
-  const std::string map_frame_ = "map";
+  std::string map_frame_ = "map";
+  rclcpp::Node::SharedPtr node_;
+  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
 
