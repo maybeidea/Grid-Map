@@ -149,6 +149,7 @@ private:
   std::thread mapping_thread_;
 
   uint64_t snapshot_version_ = 0;
+  mutable std::mutex snapshot_mutex_;
   std::shared_ptr<const EsdfSnapshot> latest_esdf_snapshot_;
 
   inline int toAddress(const Eigen::Vector3i &id);

@@ -241,7 +241,8 @@ bool GridMap::pointCloudCallback(
 }
 
 std::shared_ptr<const EsdfSnapshot> GridMap::snapshot() const {
-  return std::atomic_load(&latest_esdf_snapshot_);
+  std::lock_guard<std::mutex> lock(snapshot_mutex_);
+  return latest_esdf_snapshot_;
 }
 
 void GridMap::mappingLoop() {
@@ -354,6 +355,8 @@ void GridMap::publishEsdfSnapshot() {
   next->task_mapping_active = region.valid;
   next->task_roi_polygon = region.expanded_polygon;
   next->version = ++snapshot_version_;
-  std::atomic_store(&latest_esdf_snapshot_,
-                    std::shared_ptr<const EsdfSnapshot>(std::move(next)));
+  {
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    latest_esdf_snapshot_ = std::shared_ptr<const EsdfSnapshot>(std::move(next));
+  }
 }
