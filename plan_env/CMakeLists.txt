@@ -39,7 +39,6 @@ add_library(plan_env SHARED src/grid_map.cpp)
 target_include_directories(plan_env PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${PCL_INCLUDE_DIRS}
 )
 
