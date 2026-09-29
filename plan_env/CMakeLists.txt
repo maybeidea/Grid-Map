@@ -48,7 +48,10 @@ find_package(PCL REQUIRED)
 find_package(OpenMP REQUIRED)
 find_package(Threads REQUIRED)
 
-add_library(plan_env SHARED src/grid_map.cpp)
+add_library(plan_env SHARED
+    src/grid_map.cpp
+    src/ray_casting.cpp
+)
 
 target_include_directories(plan_env PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

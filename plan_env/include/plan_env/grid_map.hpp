@@ -1,6 +1,7 @@
 #include <Eigen/Eigen>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
+#include "plan_env/ray_casting.hpp"
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #if __has_include(<tf2_ros/buffer.hpp>)
@@ -15,6 +16,7 @@
 #endif
 
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -50,7 +52,10 @@ enum class OccupancyState { FREE, OCCUPIED, UNKNOWN };
 
 struct EsdfSnapshot {
   GridGeometry geometry;
+  std::vector<TsdfVoxel> tsdf_voxels;
+  std::vector<OccupancyVoxel> occupancy_voxels;
   std::vector<EsdfVoxel> esdf_voxels;
+  Eigen::Vector3f camera_position = Eigen::Vector3f::Zero();
   // The same expanded XY rectangle is used as the task ROI and map window.
   std::vector<Eigen::Vector2f> task_roi_polygon;
   bool task_mapping_active = false;
@@ -107,8 +112,16 @@ public:
 
 private:
   void mappingLoop();
+  // Point-cloud frame entry point: transform first, then run ray/map updates.
+  void processPointCloudFrame(
+      const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud);
   void processPointCloud(
       const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud);
+  void updateMapsFromRays();
+  void updateOccupancyVoxel(OccupancyVoxel &voxel, bool hit);
+  void updateTsdfVoxel(TsdfVoxel &voxel, const Eigen::Vector3i &voxel_id,
+                       const Eigen::Vector3f &ray_origin,
+                       const Eigen::Vector3f &ray_end);
   void publishEsdfSnapshot();
   void clearMappingBuffers();
 
@@ -144,26 +157,27 @@ private:
   mutable std::mutex snapshot_mutex_;
   std::shared_ptr<const EsdfSnapshot> latest_esdf_snapshot_;
 
-  inline int toAddress(const Eigen::Vector3i &id);
-  inline int toAddress(int x, int y, int z);
-  inline int toAddress2d(int x, int y);
+  inline int toAddress(const Eigen::Vector3i &id) const;
+  inline int toAddress(int x, int y, int z) const;
+  inline int toAddress2d(int x, int y) const;
+
   inline void boundIndex(Eigen::Vector3i &id);
   inline void boundIndex(Eigen::Vector2i &id);
 };
 /* ============================== definition of inline function
  * ============================== */
 
-inline int GridMap::toAddress(const Eigen::Vector3i &id) {
+inline int GridMap::toAddress(const Eigen::Vector3i &id) const {
   return id(0) * grid_geometry_.size_y * grid_geometry_.size_z +
          id(1) * grid_geometry_.size_z + id(2);
 }
 
-inline int GridMap::toAddress(int x, int y, int z) {
+inline int GridMap::toAddress(int x, int y, int z) const {
   return x * grid_geometry_.size_y * grid_geometry_.size_z +
          y * grid_geometry_.size_z + z;
 }
 
-inline int GridMap::toAddress2d(int x, int y) {
+inline int GridMap::toAddress2d(int x, int y) const {
   return x * grid_geometry_.size_y + y;
 }
 
