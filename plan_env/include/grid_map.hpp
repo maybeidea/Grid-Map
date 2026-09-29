@@ -59,7 +59,6 @@ struct EsdfSnapshot {
 
 struct TaskRegion {
   bool valid = false;
-  Eigen::Vector2f center = Eigen::Vector2f::Zero();
   Eigen::Vector2f min = Eigen::Vector2f::Zero();
   Eigen::Vector2f max = Eigen::Vector2f::Zero();
   float z_min = 0.0f;
@@ -99,9 +98,6 @@ public:
   // rectangle becomes both the map window and the ESDF/task ROI.
   bool startTaskMapping(const std::vector<Eigen::Vector2d> &polygon_xy,
                         std::string *message_out = nullptr);
-  bool startTaskMapping(double center_x, double center_y,
-                        const std::vector<Eigen::Vector2d> &polygon_xy,
-                        std::string *message_out = nullptr);
   void stopTaskMapping();
   bool isTaskMappingActive() const;
   TaskRegion taskRegion() const;
@@ -114,9 +110,6 @@ private:
   void processPointCloud(
       const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud);
   void publishEsdfSnapshot();
-  bool startTaskMappingWithCenter(double center_x, double center_y,
-                                  const std::vector<Eigen::Vector2d> &polygon_xy,
-                                  std::string *message_out);
   void clearMappingBuffers();
 
   GridGeometry grid_geometry_;
@@ -131,7 +124,6 @@ private:
   float resolution_ = 0.05f;
   float map_size_z_ = 0.60f;
   float expansion_margin_ = 0.25f;
-  float expansion_ratio_ = 0.10f;
 
   // Points retained by processPointCloud are expressed in map_frame_.
   std::vector<Eigen::Vector3f> cloud_points_;

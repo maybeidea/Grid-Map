@@ -84,45 +84,18 @@ bool GridMap::configure(const float resolution, const float map_size_z,
   resolution_ = resolution;
   map_size_z_ = map_size_z;
   expansion_margin_ = expansion_margin;
-  expansion_ratio_ = expansion_ratio;
   return true;
 }
 
-bool GridMap::startTaskMapping(const std::vector<Eigen::Vector2d> &polygon_xy,
-                               std::string *message_out) {
+bool GridMap::startTaskMapping(
+    const std::vector<Eigen::Vector2d>& polygon_xy,
+    std::string* message_out) {
+
   const auto polygon = cleanPolygon(polygon_xy);
   if (polygon.size() < 3) {
     if (message_out) {
-      *message_out = "task polygon needs at least 3 finite unique vertices";
-    }
-    return false;
-  }
-  double center_x = 0.0;
-  double center_y = 0.0;
-  for (const auto &point : polygon) {
-    center_x += point.x();
-    center_y += point.y();
-  }
-  center_x /= static_cast<double>(polygon.size());
-  center_y /= static_cast<double>(polygon.size());
-  return startTaskMappingWithCenter(center_x, center_y, polygon, message_out);
-}
-
-bool GridMap::startTaskMapping(const double center_x, const double center_y,
-                               const std::vector<Eigen::Vector2d> &polygon_xy,
-                               std::string *message_out) {
-  return startTaskMappingWithCenter(center_x, center_y, cleanPolygon(polygon_xy),
-                                    message_out);
-}
-
-bool GridMap::startTaskMappingWithCenter(
-    const double center_x, const double center_y,
-    const std::vector<Eigen::Vector2d> &polygon_xy,
-    std::string *message_out) {
-  if (polygon_xy.size() < 3 || !std::isfinite(center_x) ||
-      !std::isfinite(center_y)) {
-    if (message_out) {
-      *message_out = "invalid task polygon or center";
+      *message_out =
+          "task polygon needs at least 3 finite unique vertices";
     }
     return false;
   }
@@ -131,52 +104,68 @@ bool GridMap::startTaskMappingWithCenter(
   double min_y = std::numeric_limits<double>::infinity();
   double max_x = -std::numeric_limits<double>::infinity();
   double max_y = -std::numeric_limits<double>::infinity();
-  for (const auto &point : polygon_xy) {
-    min_x = std::min(min_x, point.x());
-    min_y = std::min(min_y, point.y());
-    max_x = std::max(max_x, point.x());
-    max_y = std::max(max_y, point.y());
+
+  for (const auto& p : polygon) {
+    min_x = std::min(min_x, p.x());
+    min_y = std::min(min_y, p.y());
+    max_x = std::max(max_x, p.x());
+    max_y = std::max(max_y, p.y());
   }
 
+  const double margin = static_cast<double>(expansion_margin_);
+  min_x -= margin;
+  min_y -= margin;
+  max_x += margin;
+  max_y += margin;
+
+  const double width = max_x - min_x;
+  const double height = max_y - min_y;
+
   std::lock_guard<std::mutex> lock(task_region_mutex_);
-  const double width = std::max(max_x - min_x, static_cast<double>(resolution_));
-  const double height = std::max(max_y - min_y, static_cast<double>(resolution_));
-  const double expand_x = std::max(static_cast<double>(expansion_margin_),
-                                   width * static_cast<double>(expansion_ratio_));
-  const double expand_y = std::max(static_cast<double>(expansion_margin_),
-                                   height * static_cast<double>(expansion_ratio_));
-  const double expanded_width = width + 2.0 * expand_x;
-  const double expanded_height = height + 2.0 * expand_y;
 
   task_region_ = TaskRegion{};
   task_region_.valid = true;
-  task_region_.center = Eigen::Vector2f(static_cast<float>(center_x),
-                                        static_cast<float>(center_y));
-  task_region_.min = Eigen::Vector2f(static_cast<float>(center_x - expanded_width * 0.5),
-                                     static_cast<float>(center_y - expanded_height * 0.5));
-  task_region_.max = Eigen::Vector2f(static_cast<float>(center_x + expanded_width * 0.5),
-                                     static_cast<float>(center_y + expanded_height * 0.5));
+  task_region_.min = {
+      static_cast<float>(min_x),
+      static_cast<float>(min_y)};
   task_region_.z_min = 0.0f;
   task_region_.z_max = map_size_z_;
   task_region_.expansion_margin = expansion_margin_;
-  task_region_.expansion_ratio = expansion_ratio_;
-  task_region_.source_polygon = polygon_xy;
+  task_region_.source_polygon = polygon;
+
+  grid_geometry_.resolution = resolution_;
+  grid_geometry_.origin = {
+      task_region_.min.x(),
+      task_region_.min.y(),
+      task_region_.z_min};
+
+  grid_geometry_.size_x = std::max(
+      1, static_cast<int>(std::ceil(width / resolution_)));
+  grid_geometry_.size_y = std::max(
+      1, static_cast<int>(std::ceil(height / resolution_)));
+  grid_geometry_.size_z = std::max(
+      1, static_cast<int>(std::ceil(map_size_z_ / resolution_)));
+
+  // Use the actual voxel-aligned map boundary.
+  task_region_.max = {
+      task_region_.min.x() +
+          grid_geometry_.size_x * resolution_,
+      task_region_.min.y() +
+          grid_geometry_.size_y * resolution_};
+
   task_region_.expanded_polygon = {
       {task_region_.min.x(), task_region_.min.y()},
       {task_region_.max.x(), task_region_.min.y()},
       {task_region_.max.x(), task_region_.max.y()},
       {task_region_.min.x(), task_region_.max.y()}};
 
-  grid_geometry_.resolution = resolution_;
-  grid_geometry_.origin = Eigen::Vector3f(task_region_.min.x(), task_region_.min.y(),
-                                          task_region_.z_min);
-  grid_geometry_.size_x = std::max(1, static_cast<int>(std::ceil(expanded_width / resolution_)));
-  grid_geometry_.size_y = std::max(1, static_cast<int>(std::ceil(expanded_height / resolution_)));
-  grid_geometry_.size_z = std::max(1, static_cast<int>(std::ceil(map_size_z_ / resolution_)));
   clearMappingBuffers();
-  const size_t voxel_count = static_cast<size_t>(grid_geometry_.size_x) *
-                             static_cast<size_t>(grid_geometry_.size_y) *
-                             static_cast<size_t>(grid_geometry_.size_z);
+
+  const size_t voxel_count =
+      static_cast<size_t>(grid_geometry_.size_x) *
+      static_cast<size_t>(grid_geometry_.size_y) *
+      static_cast<size_t>(grid_geometry_.size_z);
+
   tsdf_voxels_.assign(voxel_count, TsdfVoxel{});
   occupancy_voxels_.assign(voxel_count, OccupancyVoxel{});
   esdf_voxels_.assign(voxel_count, EsdfVoxel{});
@@ -184,14 +173,18 @@ bool GridMap::startTaskMappingWithCenter(
 
   if (message_out) {
     std::ostringstream stream;
-    stream << "task ROI started: center=[" << center_x << ", " << center_y
-           << "] source_vertices=" << polygon_xy.size() << " expanded=["
-           << task_region_.min.x() << ", " << task_region_.min.y() << "]..["
-           << task_region_.max.x() << ", " << task_region_.max.y() << "] map_voxels=["
-           << grid_geometry_.size_x << ", " << grid_geometry_.size_y << ", "
+    stream << "task ROI started: source_vertices=" << polygon.size()
+           << " expanded=[" << task_region_.min.x()
+           << ", " << task_region_.min.y()
+           << "]..[" << task_region_.max.x()
+           << ", " << task_region_.max.y()
+           << "] map_voxels=["
+           << grid_geometry_.size_x << ", "
+           << grid_geometry_.size_y << ", "
            << grid_geometry_.size_z << "]";
     *message_out = stream.str();
   }
+
   return true;
 }
 
