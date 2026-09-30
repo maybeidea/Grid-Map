@@ -180,7 +180,9 @@ bool GridMap::startTaskMapping(
       static_cast<size_t>(grid_geometry_.size_y) *
       static_cast<size_t>(grid_geometry_.size_z);
 
-  tsdf_voxels_.assign(voxel_count, TsdfVoxel{});
+  if (!tsdf_volume_.configure(grid_geometry_)) {
+    return false;
+  }
   occupancy_voxels_.assign(voxel_count, OccupancyVoxel{});
   esdf_voxels_.assign(voxel_count, EsdfVoxel{});
   cloud_points_.clear();
@@ -225,7 +227,7 @@ bool GridMap::pointInTaskRegion(const float x, const float y, const float z) con
 }
 
 void GridMap::clearMappingBuffers() {
-  tsdf_voxels_.clear();
+  tsdf_volume_.clear();
   occupancy_voxels_.clear();
   esdf_voxels_.clear();
 }
@@ -365,7 +367,7 @@ void GridMap::processPointCloud(
 
 void GridMap::updateMapsFromRays() {
   if (grid_geometry_.resolution <= 0.0f || occupancy_voxels_.empty() ||
-      tsdf_voxels_.size() != occupancy_voxels_.size()) {
+      tsdf_volume_.voxels().size() != occupancy_voxels_.size()) {
     return;
   }
   const Eigen::Vector3i grid_size(grid_geometry_.size_x,
@@ -382,7 +384,7 @@ void GridMap::updateMapsFromRays() {
             return;
           }
           updateOccupancyVoxel(occupancy_voxels_[address], hit);
-          updateTsdfVoxel(tsdf_voxels_[address], voxel_id, ray_origin, point);
+          tsdf_volume_.integrateVoxel(voxel_id, ray_origin, point);
         });
   }
 }
@@ -403,34 +405,10 @@ void GridMap::updateOccupancyVoxel(OccupancyVoxel &voxel, const bool hit) {
   }
 }
 
-void GridMap::updateTsdfVoxel(TsdfVoxel &voxel, const Eigen::Vector3i &voxel_id,
-                              const Eigen::Vector3f &ray_origin,
-                              const Eigen::Vector3f &ray_end) {
-  // This is the current placeholder fusion policy. Keep the interface stable
-  // while the sensor-specific TSDF distance model is completed later.
-  const Eigen::Vector3f center =
-      grid_geometry_.origin +
-      (voxel_id.cast<float>() + Eigen::Vector3f::Constant(0.5f)) *
-          grid_geometry_.resolution;
-  const Eigen::Vector3f direction = ray_end - ray_origin;
-  const float norm = direction.norm();
-  const float projection =
-      norm > 0.0f ? (center - ray_origin).dot(direction) / norm : 0.0f;
-  const float signed_distance = norm - projection;
-  constexpr float kTsdfTruncation = 0.20f;
-  const float distance =
-      std::max(-kTsdfTruncation,
-               std::min(kTsdfTruncation, signed_distance)) /
-      kTsdfTruncation;
-  const float new_weight = voxel.weight + 1.0f;
-  voxel.distance = (voxel.distance * voxel.weight + distance) / new_weight;
-  voxel.weight = new_weight;
-}
-
 void GridMap::publishEsdfSnapshot() {
   auto next = std::make_shared<EsdfSnapshot>();
   next->geometry = grid_geometry_;
-  next->tsdf_voxels = tsdf_voxels_;
+  next->tsdf_voxels = tsdf_volume_.voxels();
   next->occupancy_voxels = occupancy_voxels_;
   next->esdf_voxels = esdf_voxels_;
   next->camera_position = camera_position_;

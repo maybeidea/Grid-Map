@@ -4,3 +4,4 @@ install/
 log/
 .vscode/
 __pycache__/
+AGENTS.md

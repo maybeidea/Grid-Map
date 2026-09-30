@@ -51,6 +51,7 @@ find_package(Threads REQUIRED)
 add_library(plan_env SHARED
     src/grid_map.cpp
     src/ray_casting.cpp
+    src/tsdf.cpp
 )
 
 target_include_directories(plan_env PUBLIC

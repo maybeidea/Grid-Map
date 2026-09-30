@@ -2,6 +2,7 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include "plan_env/ray_casting.hpp"
+#include "plan_env/tsdf.hpp"
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #if __has_include(<tf2_ros/buffer.hpp>)
@@ -25,19 +26,6 @@
 #include <thread>
 #include <vector>
 
-struct GridGeometry {
-  Eigen::Vector3f origin = Eigen::Vector3f::Zero();
-
-  float resolution = 0.0f;
-
-  int size_x = 0;
-  int size_y = 0;
-  int size_z = 0;
-};
-struct TsdfVoxel {
-  float distance = 1.0f; // normalized [-1, 1]
-  float weight = 0.0f;
-};
 struct OccupancyVoxel {
   float log_odds = 0.0f;
 
@@ -119,15 +107,12 @@ private:
       const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud);
   void updateMapsFromRays();
   void updateOccupancyVoxel(OccupancyVoxel &voxel, bool hit);
-  void updateTsdfVoxel(TsdfVoxel &voxel, const Eigen::Vector3i &voxel_id,
-                       const Eigen::Vector3f &ray_origin,
-                       const Eigen::Vector3f &ray_end);
   void publishEsdfSnapshot();
   void clearMappingBuffers();
 
   GridGeometry grid_geometry_;
 
-  std::vector<TsdfVoxel> tsdf_voxels_;
+  tsdf::TsdfVolume tsdf_volume_;
   std::vector<OccupancyVoxel> occupancy_voxels_;
 
   std::vector<EsdfVoxel> esdf_voxels_;
