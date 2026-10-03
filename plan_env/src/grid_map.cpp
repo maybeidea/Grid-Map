@@ -75,11 +75,71 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node) {
     cloud_sub_.reset();
     return;
   }
+  // Keep the gate configurable without requiring callers to change the API.
+  // get_parameter_or also works when a launch file did not provide overrides.
+  node_->get_parameter_or("grid_map.motion_frame", motion_frame_, motion_frame_);
+  node_->get_parameter_or("grid_map.motion_translation_threshold",
+                          motion_translation_threshold_,
+                          motion_translation_threshold_);
+  node_->get_parameter_or("grid_map.motion_rotation_threshold_rad",
+                          motion_rotation_threshold_rad_,
+                          motion_rotation_threshold_rad_);
+  int stationary_frames = static_cast<int>(stationary_frames_required_);
+  node_->get_parameter_or("grid_map.stationary_frames", stationary_frames,
+                          stationary_frames);
+  if (stationary_frames > 0) {
+    stationary_frames_required_ = static_cast<uint32_t>(stationary_frames);
+  }
+  if (!std::isfinite(motion_translation_threshold_) ||
+      motion_translation_threshold_ < 0.0f) {
+    motion_translation_threshold_ = 0.03f;
+  }
+  if (!std::isfinite(motion_rotation_threshold_rad_) ||
+      motion_rotation_threshold_rad_ < 0.0f) {
+    motion_rotation_threshold_rad_ = 0.02f;
+  }
   cloud_sub_ = node_->create_subscription<sensor_msgs::msg::PointCloud2>(
       "point_cloud", rclcpp::SensorDataQoS(),
       [this](const sensor_msgs::msg::PointCloud2::ConstSharedPtr cloud) {
         pointCloudCallback(cloud);
       });
+}
+
+bool GridMap::configureMotion(const float translation_threshold,
+                              const float rotation_threshold_rad,
+                              const uint32_t stationary_frames) {
+  if (!std::isfinite(translation_threshold) || translation_threshold < 0.0f ||
+      !std::isfinite(rotation_threshold_rad) || rotation_threshold_rad < 0.0f ||
+      stationary_frames == 0) {
+    return false;
+  }
+  {
+    std::lock_guard<std::mutex> lock(motion_mutex_);
+    motion_translation_threshold_ = translation_threshold;
+    motion_rotation_threshold_rad_ = rotation_threshold_rad;
+    stationary_frames_required_ = stationary_frames;
+  }
+  resetMotionState();
+  return true;
+}
+
+MappingStatus GridMap::mappingStatus() const {
+  std::lock_guard<std::mutex> lock(motion_mutex_);
+  MappingStatus status;
+  status.motion_state = motion_state_;
+  status.last_fusion_mode = last_fusion_mode_;
+  status.stationary_frame_count = stationary_frame_count_;
+  status.stationary_frames_required = stationary_frames_required_;
+  status.position_index = position_index_;
+  status.same_position_fused_frames = same_position_fused_frames_;
+  status.different_position_fused_frames = different_position_fused_frames_;
+  status.ready_to_move = motion_state_ == MotionState::kReadyToMove;
+  return status;
+}
+
+bool GridMap::readyToMove() const {
+  std::lock_guard<std::mutex> lock(motion_mutex_);
+  return motion_state_ == MotionState::kReadyToMove;
 }
 
 bool GridMap::configure(const float resolution, const float map_size_z,
@@ -174,6 +234,7 @@ bool GridMap::startTaskMapping(
       {task_region_.min.x(), task_region_.max.y()}};
 
   clearMappingBuffers();
+  resetMotionState();
 
   const size_t voxel_count =
       static_cast<size_t>(grid_geometry_.size_x) *
@@ -208,6 +269,7 @@ void GridMap::stopTaskMapping() {
   std::lock_guard<std::mutex> lock(task_region_mutex_);
   task_region_ = TaskRegion{};
   clearMappingBuffers();
+  resetMotionState();
   grid_geometry_ = GridGeometry{};
 }
 
@@ -275,17 +337,36 @@ void GridMap::mappingLoop() {
 
 void GridMap::processPointCloudFrame(
     const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud) {
-  processPointCloud(cloud);
-  updateMapsFromRays();
+  PreparedCloud prepared;
+  if (!processPointCloud(cloud, &prepared)) {
+    return;
+  }
+
+  FusionMode mode = FusionMode::kSamePosition;
+  if (!updateMotionState(prepared, &mode)) {
+    // A cloud can still be transformed while the robot is moving, but it is
+    // intentionally not committed to cloud_points_ or to any map layer.
+    return;
+  }
+
+  cloud_points_ = std::move(prepared.points);
+  camera_position_ = prepared.camera_position;
+  if (mode == FusionMode::kSamePosition) {
+    fuseSamePositionFrame();
+  } else {
+    fuseDifferentPositionFrame();
+  }
 }
 
-void GridMap::processPointCloud(
-    const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud) {
-  // Keep the point list for the current frame; TSDF and occupancy values are
-  // intentionally accumulated across frames until the task is restarted.
-  cloud_points_.clear();
+bool GridMap::processPointCloud(
+    const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud,
+    PreparedCloud *prepared) {
+  if (!prepared) {
+    return false;
+  }
+  prepared->points.clear();
   if (!cloud || cloud->data.empty() || cloud->header.frame_id.empty()) {
-    return;
+    return false;
   }
 
   // 转pcl并过滤无效点
@@ -304,7 +385,7 @@ void GridMap::processPointCloud(
   finite_cloud->height = 1;
   finite_cloud->is_dense = true;
   if (finite_cloud->empty()) {
-    return;
+    return false;
   }
 
   constexpr float kCloudLeafSize = 0.1f;
@@ -316,14 +397,14 @@ void GridMap::processPointCloud(
   voxel_filter.setLeafSize(kCloudLeafSize, kCloudLeafSize, kCloudLeafSize);
   voxel_filter.filter(filtered_cloud);
   if (filtered_cloud.empty()) {
-    return;
+    return false;
   }
 
   const std::string source_frame = cloud->header.frame_id.front() == '/'
                                        ? cloud->header.frame_id.substr(1)
                                        : cloud->header.frame_id;
   if (source_frame.empty()) {
-    return;
+    return false;
   }
   geometry_msgs::msg::TransformStamped transform;
   try {
@@ -331,7 +412,7 @@ void GridMap::processPointCloud(
         map_frame_, source_frame, cloud->header.stamp,
         rclcpp::Duration::from_seconds(0.05));
   } catch (const tf2::TransformException &) {
-    return;
+    return false;
   }
 
   const auto &translation = transform.transform.translation;
@@ -361,8 +442,148 @@ void GridMap::processPointCloud(
     }
     transformed_points.push_back(point_map);
   }
-  cloud_points_ = std::move(transformed_points);
-  camera_position_ = translation_vector;
+  if (transformed_points.empty()) {
+    return false;
+  }
+
+  prepared->points = std::move(transformed_points);
+  prepared->camera_position = translation_vector;
+
+  // The chassis/base pose is the preferred motion signal. A camera-mounted
+  // pose is a safe fallback for setups that do not publish motion_frame_.
+  prepared->motion_position = translation_vector;
+  prepared->motion_orientation = map_from_camera;
+  if (!motion_frame_.empty() && motion_frame_ != source_frame) {
+    try {
+      const auto motion_transform = tf_buffer_->lookupTransform(
+          map_frame_, motion_frame_, cloud->header.stamp,
+          rclcpp::Duration::from_seconds(0.05));
+      const auto &motion_translation = motion_transform.transform.translation;
+      const auto &motion_rotation = motion_transform.transform.rotation;
+      prepared->motion_position = Eigen::Vector3f(
+          static_cast<float>(motion_translation.x),
+          static_cast<float>(motion_translation.y),
+          static_cast<float>(motion_translation.z));
+      prepared->motion_orientation = Eigen::Quaternionf(
+          static_cast<float>(motion_rotation.w),
+          static_cast<float>(motion_rotation.x),
+          static_cast<float>(motion_rotation.y),
+          static_cast<float>(motion_rotation.z)).normalized();
+    } catch (const tf2::TransformException &) {
+      // Keep the cloud-frame pose fallback. It preserves operation for
+      // systems that only publish a camera TF tree.
+    }
+  }
+  return true;
+}
+
+void GridMap::resetMotionState() {
+  std::lock_guard<std::mutex> lock(motion_mutex_);
+  motion_state_ = MotionState::kWaitingForPose;
+  last_fusion_mode_ = FusionMode::kSamePosition;
+  last_motion_position_.setZero();
+  last_motion_orientation_ = Eigen::Quaternionf::Identity();
+  stationary_anchor_position_.setZero();
+  stationary_anchor_orientation_ = Eigen::Quaternionf::Identity();
+  has_last_motion_pose_ = false;
+  has_stationary_anchor_ = false;
+  awaiting_new_position_ = false;
+  stationary_frame_count_ = 0;
+  position_index_ = 0;
+  same_position_fused_frames_ = 0;
+  different_position_fused_frames_ = 0;
+}
+
+bool GridMap::updateMotionState(const PreparedCloud &prepared, FusionMode *mode) {
+  if (!mode || !prepared.motion_position.allFinite() ||
+      !prepared.motion_orientation.coeffs().allFinite()) {
+    return false;
+  }
+
+  std::lock_guard<std::mutex> lock(motion_mutex_);
+  if (!has_last_motion_pose_) {
+    last_motion_position_ = prepared.motion_position;
+    last_motion_orientation_ = prepared.motion_orientation;
+    has_last_motion_pose_ = true;
+    motion_state_ = MotionState::kWaitingForPose;
+    return false;
+  }
+
+  const float translation_delta =
+      (prepared.motion_position - last_motion_position_).norm();
+  const float rotation_delta =
+      Eigen::AngleAxisf(last_motion_orientation_.conjugate() *
+                            prepared.motion_orientation)
+          .angle();
+  const float anchor_translation_delta =
+      has_stationary_anchor_
+          ? (prepared.motion_position - stationary_anchor_position_).norm()
+          : 0.0f;
+  const float anchor_rotation_delta =
+      has_stationary_anchor_
+          ? Eigen::AngleAxisf(stationary_anchor_orientation_.conjugate() *
+                                  prepared.motion_orientation)
+                .angle()
+          : 0.0f;
+  last_motion_position_ = prepared.motion_position;
+  last_motion_orientation_ = prepared.motion_orientation;
+
+  if (translation_delta > motion_translation_threshold_ ||
+      rotation_delta > motion_rotation_threshold_rad_ ||
+      anchor_translation_delta > motion_translation_threshold_ ||
+      anchor_rotation_delta > motion_rotation_threshold_rad_) {
+    motion_state_ = MotionState::kMoving;
+    stationary_frame_count_ = 0;
+    awaiting_new_position_ = true;
+    return false;
+  }
+
+  // Once 30 frames have been fused, stop accepting additional frames at the
+  // same stop. This is the gate that tells the planner it may command motion.
+  if (motion_state_ == MotionState::kReadyToMove) {
+    return false;
+  }
+
+  const bool new_position = !has_stationary_anchor_ || awaiting_new_position_;
+  if (new_position) {
+    stationary_anchor_position_ = prepared.motion_position;
+    stationary_anchor_orientation_ = prepared.motion_orientation;
+    has_stationary_anchor_ = true;
+    awaiting_new_position_ = false;
+    stationary_frame_count_ = 0;
+    ++position_index_;
+    *mode = position_index_ > 1 ? FusionMode::kDifferentPosition
+                                : FusionMode::kSamePosition;
+  } else {
+    *mode = FusionMode::kSamePosition;
+  }
+
+  ++stationary_frame_count_;
+  motion_state_ = stationary_frame_count_ >= stationary_frames_required_
+                      ? MotionState::kReadyToMove
+                      : MotionState::kStationaryCollecting;
+  last_fusion_mode_ = *mode;
+  return true;
+}
+
+void GridMap::fuseSamePositionFrame() {
+  // Placeholder policy boundary: temporal fusion at one stationary pose.
+  {
+    std::lock_guard<std::mutex> lock(motion_mutex_);
+    ++same_position_fused_frames_;
+  }
+  updateMapsFromRays();
+}
+
+void GridMap::fuseDifferentPositionFrame() {
+  // Placeholder policy boundary: merge a completed pose into the world map.
+  // This is intentionally separate from same-position temporal fusion so the
+  // two algorithms can evolve independently later.
+  {
+    std::lock_guard<std::mutex> lock(motion_mutex_);
+    ++different_position_fused_frames_;
+  }
+  updateMapsFromRays();
 }
 
 void GridMap::updateMapsFromRays() {
@@ -415,6 +636,7 @@ void GridMap::publishEsdfSnapshot() {
   const TaskRegion region = taskRegion();
   next->task_mapping_active = region.valid;
   next->task_roi_polygon = region.expanded_polygon;
+  next->mapping_status = mappingStatus();
   next->version = ++snapshot_version_;
   {
     std::lock_guard<std::mutex> lock(snapshot_mutex_);

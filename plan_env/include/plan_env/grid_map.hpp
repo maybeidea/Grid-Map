@@ -38,6 +38,31 @@ struct EsdfVoxel {
 };
 enum class OccupancyState { FREE, OCCUPIED, UNKNOWN };
 
+/** Mapping gate driven by consecutive timestamped TF poses. */
+enum class MotionState {
+  kWaitingForPose,
+  kMoving,
+  kStationaryCollecting,
+  kReadyToMove,
+};
+
+/** The fusion policy is deliberately selected before the map update. */
+enum class FusionMode {
+  kSamePosition,
+  kDifferentPosition,
+};
+
+struct MappingStatus {
+  MotionState motion_state = MotionState::kWaitingForPose;
+  FusionMode last_fusion_mode = FusionMode::kSamePosition;
+  uint32_t stationary_frame_count = 0;
+  uint32_t stationary_frames_required = 30;
+  uint64_t position_index = 0;
+  uint64_t same_position_fused_frames = 0;
+  uint64_t different_position_fused_frames = 0;
+  bool ready_to_move = false;
+};
+
 struct EsdfSnapshot {
   GridGeometry geometry;
   std::vector<TsdfVoxel> tsdf_voxels;
@@ -47,6 +72,7 @@ struct EsdfSnapshot {
   // The same expanded XY rectangle is used as the task ROI and map window.
   std::vector<Eigen::Vector2f> task_roi_polygon;
   bool task_mapping_active = false;
+  MappingStatus mapping_status;
   uint64_t version = 0;
 };
 
@@ -98,13 +124,33 @@ public:
 
   std::shared_ptr<const EsdfSnapshot> snapshot() const;
 
+  /** Configure the pose gate. Values are per-cloud pose deltas. */
+  bool configureMotion(float translation_threshold = 0.03f,
+                       float rotation_threshold_rad = 0.02f,
+                       uint32_t stationary_frames = 30);
+  MappingStatus mappingStatus() const;
+  bool readyToMove() const;
+
 private:
   void mappingLoop();
   // Point-cloud frame entry point: transform first, then run ray/map updates.
   void processPointCloudFrame(
       const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud);
-  void processPointCloud(
-      const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud);
+  struct PreparedCloud {
+    std::vector<Eigen::Vector3f> points;
+    Eigen::Vector3f camera_position = Eigen::Vector3f::Zero();
+    Eigen::Vector3f motion_position = Eigen::Vector3f::Zero();
+    Eigen::Quaternionf motion_orientation = Eigen::Quaternionf::Identity();
+  };
+  bool processPointCloud(
+      const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud,
+      PreparedCloud *prepared);
+  bool updateMotionState(const PreparedCloud &prepared, FusionMode *mode);
+  void resetMotionState();
+  // Separate policy entry points. They currently share ray integration until
+  // the same-position and cross-position fusion rules are specified.
+  void fuseSamePositionFrame();
+  void fuseDifferentPositionFrame();
   void updateMapsFromRays();
   void updateOccupancyVoxel(OccupancyVoxel &voxel, bool hit);
   void publishEsdfSnapshot();
@@ -127,6 +173,9 @@ private:
   std::vector<Eigen::Vector3f> cloud_points_;
   Eigen::Vector3f camera_position_ = Eigen::Vector3f::Zero();
   std::string map_frame_ = "map";
+  // Base pose is preferred for motion gating so arm/camera motion does not
+  // look like chassis motion. If unavailable, the cloud frame pose is used.
+  std::string motion_frame_ = "base_footprint";
   rclcpp::Node::SharedPtr node_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
@@ -141,6 +190,24 @@ private:
   uint64_t snapshot_version_ = 0;
   mutable std::mutex snapshot_mutex_;
   std::shared_ptr<const EsdfSnapshot> latest_esdf_snapshot_;
+
+  mutable std::mutex motion_mutex_;
+  MotionState motion_state_ = MotionState::kWaitingForPose;
+  FusionMode last_fusion_mode_ = FusionMode::kSamePosition;
+  Eigen::Vector3f last_motion_position_ = Eigen::Vector3f::Zero();
+  Eigen::Quaternionf last_motion_orientation_ = Eigen::Quaternionf::Identity();
+  Eigen::Vector3f stationary_anchor_position_ = Eigen::Vector3f::Zero();
+  Eigen::Quaternionf stationary_anchor_orientation_ = Eigen::Quaternionf::Identity();
+  bool has_last_motion_pose_ = false;
+  bool has_stationary_anchor_ = false;
+  bool awaiting_new_position_ = false;
+  uint32_t stationary_frame_count_ = 0;
+  uint32_t stationary_frames_required_ = 30;
+  uint64_t position_index_ = 0;
+  uint64_t same_position_fused_frames_ = 0;
+  uint64_t different_position_fused_frames_ = 0;
+  float motion_translation_threshold_ = 0.03f;
+  float motion_rotation_threshold_rad_ = 0.02f;
 
   inline int toAddress(const Eigen::Vector3i &id) const;
   inline int toAddress(int x, int y, int z) const;

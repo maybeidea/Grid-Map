@@ -5,3 +5,4 @@ log/
 .vscode/
 __pycache__/
 AGENTS.md
+docs/
