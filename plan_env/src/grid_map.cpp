@@ -161,6 +161,28 @@ bool GridMap::configure(const float resolution, const float map_size_z,
   return true;
 }
 
+bool GridMap::configureOccupancy(const occupancy::LogOddsConfig &config) {
+  std::lock_guard<std::mutex> lock(task_region_mutex_);
+  if (task_region_.valid) {
+    return false;
+  }
+  return occupancy_model_.configure(config);
+}
+
+bool GridMap::configureEsdf(const esdf::EsdfConfig &config) {
+  std::lock_guard<std::mutex> lock(task_region_mutex_);
+  if (task_region_.valid) {
+    return false;
+  }
+  // Validate without changing the active volume. The volume is configured
+  // with this saved policy when the next task ROI is started.
+  if (!std::isfinite(config.max_distance) || config.max_distance < 0.0f) {
+    return false;
+  }
+  esdf_config_ = config;
+  return true;
+}
+
 bool GridMap::startTaskMapping(
     const std::vector<Eigen::Vector2d>& polygon_xy,
     std::string* message_out) {
@@ -245,7 +267,11 @@ bool GridMap::startTaskMapping(
     return false;
   }
   occupancy_voxels_.assign(voxel_count, OccupancyVoxel{});
-  esdf_voxels_.assign(voxel_count, EsdfVoxel{});
+  if (!esdf_volume_.configure(grid_geometry_, esdf_config_)) {
+    occupancy_voxels_.clear();
+    tsdf_volume_.clear();
+    return false;
+  }
   cloud_points_.clear();
 
   if (message_out) {
@@ -290,8 +316,8 @@ bool GridMap::pointInTaskRegion(const float x, const float y, const float z) con
 
 void GridMap::clearMappingBuffers() {
   tsdf_volume_.clear();
+  esdf_volume_.clear();
   occupancy_voxels_.clear();
-  esdf_voxels_.clear();
 }
 
 bool GridMap::pointCloudCallback(
@@ -608,22 +634,15 @@ void GridMap::updateMapsFromRays() {
           tsdf_volume_.integrateVoxel(voxel_id, ray_origin, point);
         });
   }
+  updateEsdf();
 }
 
 void GridMap::updateOccupancyVoxel(OccupancyVoxel &voxel, const bool hit) {
-  // Update policy is intentionally isolated so sensor-specific log-odds
-  // calibration can be added without changing ray traversal.
-  if (hit) {
-    voxel.hit_count = static_cast<uint16_t>(std::min<uint32_t>(
-        std::numeric_limits<uint16_t>::max(),
-        static_cast<uint32_t>(voxel.hit_count) + 1));
-    voxel.log_odds += 0.85f;
-  } else {
-    voxel.miss_count = static_cast<uint16_t>(std::min<uint32_t>(
-        std::numeric_limits<uint16_t>::max(),
-        static_cast<uint32_t>(voxel.miss_count) + 1));
-    voxel.log_odds -= 0.4f;
-  }
+  occupancy_model_.update(voxel, hit);
+}
+
+void GridMap::updateEsdf() {
+  esdf_volume_.compute(occupancy_voxels_, occupancy_model_);
 }
 
 void GridMap::publishEsdfSnapshot() {
@@ -631,7 +650,14 @@ void GridMap::publishEsdfSnapshot() {
   next->geometry = grid_geometry_;
   next->tsdf_voxels = tsdf_volume_.voxels();
   next->occupancy_voxels = occupancy_voxels_;
-  next->esdf_voxels = esdf_voxels_;
+  next->occupancy_probabilities.resize(occupancy_voxels_.size());
+  next->occupancy_states.resize(occupancy_voxels_.size());
+  for (size_t i = 0; i < occupancy_voxels_.size(); ++i) {
+    next->occupancy_probabilities[i] =
+        occupancy_model_.probability(occupancy_voxels_[i]);
+    next->occupancy_states[i] = occupancy_model_.state(occupancy_voxels_[i]);
+  }
+  next->esdf_voxels = esdf_volume_.voxels();
   next->camera_position = camera_position_;
   const TaskRegion region = taskRegion();
   next->task_mapping_active = region.valid;

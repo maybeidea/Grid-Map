@@ -1,6 +1,8 @@
 #include <Eigen/Eigen>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
+#include "plan_env/esdf.hpp"
+#include "plan_env/occupancy.hpp"
 #include "plan_env/ray_casting.hpp"
 #include "plan_env/tsdf.hpp"
 #include <rclcpp/rclcpp.hpp>
@@ -26,17 +28,7 @@
 #include <thread>
 #include <vector>
 
-struct OccupancyVoxel {
-  float log_odds = 0.0f;
-
-  uint16_t hit_count = 0;
-  uint16_t miss_count = 0;
-};
 struct QualityVoxel {};
-struct EsdfVoxel {
-  float distance = 100000.0f;
-};
-enum class OccupancyState { FREE, OCCUPIED, UNKNOWN };
 
 /** Mapping gate driven by consecutive timestamped TF poses. */
 enum class MotionState {
@@ -67,6 +59,8 @@ struct EsdfSnapshot {
   GridGeometry geometry;
   std::vector<TsdfVoxel> tsdf_voxels;
   std::vector<OccupancyVoxel> occupancy_voxels;
+  std::vector<float> occupancy_probabilities;
+  std::vector<OccupancyState> occupancy_states;
   std::vector<EsdfVoxel> esdf_voxels;
   Eigen::Vector3f camera_position = Eigen::Vector3f::Zero();
   // The same expanded XY rectangle is used as the task ROI and map window.
@@ -113,6 +107,11 @@ public:
                  float expansion_margin = 0.25f,
                  float expansion_ratio = 0.10f);
 
+  // Configure the sensor update increments and occupancy decision thresholds.
+  bool configureOccupancy(const occupancy::LogOddsConfig &config);
+  // Configure occupancy-to-ESDF conversion before starting a task.
+  bool configureEsdf(const esdf::EsdfConfig &config);
+
   // Record a task polygon and derive one expanded rectangular ROI. This same
   // rectangle becomes both the map window and the ESDF/task ROI.
   bool startTaskMapping(const std::vector<Eigen::Vector2d> &polygon_xy,
@@ -153,15 +152,17 @@ private:
   void fuseDifferentPositionFrame();
   void updateMapsFromRays();
   void updateOccupancyVoxel(OccupancyVoxel &voxel, bool hit);
+  void updateEsdf();
   void publishEsdfSnapshot();
   void clearMappingBuffers();
 
   GridGeometry grid_geometry_;
 
   tsdf::TsdfVolume tsdf_volume_;
+  occupancy::LogOddsModel occupancy_model_;
+  esdf::EsdfConfig esdf_config_;
   std::vector<OccupancyVoxel> occupancy_voxels_;
-
-  std::vector<EsdfVoxel> esdf_voxels_;
+  esdf::EsdfVolume esdf_volume_;
 
   mutable std::mutex task_region_mutex_;
   TaskRegion task_region_;
