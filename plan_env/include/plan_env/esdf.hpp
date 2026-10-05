@@ -6,6 +6,8 @@
 #include <cstddef>
 #include <vector>
 
+namespace plan_env {
+
 struct EsdfVoxel {
   float distance = 100000.0f;
 };
@@ -43,3 +45,5 @@ private:
 };
 
 } // namespace esdf
+
+}  // namespace plan_env

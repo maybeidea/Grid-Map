@@ -4,6 +4,8 @@
 #include <cmath>
 #include <limits>
 
+namespace plan_env {
+
 namespace ray_casting {
 namespace {
 
@@ -153,3 +155,5 @@ bool traverseRay(const Eigen::Vector3f &grid_origin, const float resolution,
 }
 
 } // namespace ray_casting
+
+}  // namespace plan_env

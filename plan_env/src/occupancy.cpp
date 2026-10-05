@@ -4,6 +4,8 @@
 #include <cmath>
 #include <limits>
 
+namespace plan_env {
+
 namespace occupancy {
 namespace {
 
@@ -90,3 +92,5 @@ bool LogOddsModel::isOccupied(const OccupancyVoxel &voxel) const {
 }
 
 } // namespace occupancy
+
+}  // namespace plan_env

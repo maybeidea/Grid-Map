@@ -5,6 +5,8 @@
 #include <cstddef>
 #include <vector>
 
+namespace plan_env {
+
 struct GridGeometry {
   Eigen::Vector3f origin = Eigen::Vector3f::Zero();
   float resolution = 0.0f;
@@ -48,3 +50,5 @@ private:
 };
 
 } // namespace tsdf
+
+}  // namespace plan_env

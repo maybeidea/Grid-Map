@@ -34,6 +34,7 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(ament_cmake_target_dependencies REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(bimax_msgs QUIET)
 find_package(pcl_conversions REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
@@ -90,6 +91,12 @@ else()
   )
 endif()
 
+if(bimax_msgs_FOUND)
+  target_sources(plan_env PRIVATE src/height_map.cpp)
+  target_compile_definitions(plan_env PUBLIC PLAN_ENV_HAS_BIMAX_MSGS=1)
+  ament_target_dependencies(plan_env bimax_msgs)
+endif()
+
 install(TARGETS plan_env
   EXPORT export_plan_env
   ARCHIVE DESTINATION lib
@@ -102,5 +109,8 @@ ament_export_include_directories(include)
 ament_export_dependencies(
     geometry_msgs pcl_conversions rclcpp sensor_msgs tf2 tf2_ros
 )
+if(bimax_msgs_FOUND)
+  ament_export_dependencies(bimax_msgs)
+endif()
 
 ament_package()

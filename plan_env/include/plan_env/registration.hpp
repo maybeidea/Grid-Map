@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <vector>
 
+namespace plan_env {
+
 namespace registration {
 
 struct Config {
@@ -51,3 +53,5 @@ private:
 };
 
 } // namespace registration
+
+}  // namespace plan_env

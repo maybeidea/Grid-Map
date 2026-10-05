@@ -1,13 +1,20 @@
 #include <Eigen/Eigen>
+#include <Eigen/Geometry>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include "plan_env/esdf.hpp"
+#include "plan_env/height_map.hpp"
 #include "plan_env/occupancy.hpp"
 #include "plan_env/ray_casting.hpp"
 #include "plan_env/registration.hpp"
 #include "plan_env/tsdf.hpp"
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#ifdef PLAN_ENV_HAS_BIMAX_MSGS
+#include <bimax_msgs/msg/height_map.hpp>
+#else
+namespace bimax_msgs { namespace msg { struct HeightMap; } }
+#endif
 #if __has_include(<tf2_ros/buffer.hpp>)
 #include <tf2_ros/buffer.hpp>
 #else
@@ -28,6 +35,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+namespace plan_env {
 
 struct QualityVoxel {};
 
@@ -91,6 +100,7 @@ struct TaskRegion {
 
 class GridMap {
 public:
+  enum { INVALID_IDX = -10000 };
   GridMap();
   ~GridMap();
 
@@ -102,6 +112,13 @@ public:
 
   bool pointCloudCallback(
       const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud);
+
+  void posToIndex(const Eigen::Vector3d &pos, Eigen::Vector3i &id) const;
+  bool isInMap(const Eigen::Vector3i &id) const;
+  double getResolution() const;
+  void getRegion(Eigen::Vector3d &origin, Eigen::Vector3d &size) const;
+  void boundIndex(Eigen::Vector3i &id) const;
+  void boundIndex(Eigen::Vector2i &id) const;
 
   // Configure the voxel map before starting a task. The task ROI is supplied
   // later through startTaskMapping(), so one GridMap instance can be reused.
@@ -137,6 +154,9 @@ public:
                        uint32_t stationary_frames = 30);
   MappingStatus mappingStatus() const;
   bool readyToMove() const;
+  bool buildHeightMapMsg(bimax_msgs::msg::HeightMap &msg,
+                         const Eigen::Isometry3d &T_map_from_height);
+  void publishHeightMap();
 
 private:
   void mappingLoop();
@@ -185,6 +205,15 @@ private:
   float map_size_z_ = 0.60f;
   float expansion_margin_ = 0.25f;
   float cloud_leaf_size_ = 0.005f;
+  bool height_map_enable_ = true;
+  std::string height_map_topic_ = "/complex_area_plan/height";
+  std::string height_map_frame_ = "base_footprint";
+  double height_band_z_max_ = 0.50;
+  double height_completeness_z_max_ = 0.20;
+  double height_floor_tol_ = 0.02;
+  double height_blocked_at_floor_threshold_ = 0.04;
+  double height_z_tcp_min_ = 0.07;
+  double height_ceil_threshold_open_ = 0.50;
 
   // Points retained by processPointCloud are expressed in map_frame_.
   std::vector<Eigen::Vector3f> cloud_points_;
@@ -195,6 +224,9 @@ private:
   std::string motion_frame_ = "base_footprint";
   rclcpp::Node::SharedPtr node_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
+#ifdef PLAN_ENV_HAS_BIMAX_MSGS
+  rclcpp::Publisher<bimax_msgs::msg::HeightMap>::SharedPtr height_map_pub_;
+#endif
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
 
@@ -229,9 +261,6 @@ private:
   inline int toAddress(const Eigen::Vector3i &id) const;
   inline int toAddress(int x, int y, int z) const;
   inline int toAddress2d(int x, int y) const;
-
-  inline void boundIndex(Eigen::Vector3i &id);
-  inline void boundIndex(Eigen::Vector2i &id);
 };
 /* ============================== definition of inline function
  * ============================== */
@@ -250,7 +279,7 @@ inline int GridMap::toAddress2d(int x, int y) const {
   return x * grid_geometry_.size_y + y;
 }
 
-inline void GridMap::boundIndex(Eigen::Vector3i &id) {
+inline void GridMap::boundIndex(Eigen::Vector3i &id) const {
   Eigen::Vector3i id1;
   id1(0) = std::max(std::min(id(0), grid_geometry_.size_x - 1), 0);
   id1(1) = std::max(std::min(id(1), grid_geometry_.size_y - 1), 0);
@@ -258,9 +287,11 @@ inline void GridMap::boundIndex(Eigen::Vector3i &id) {
   id = id1;
 }
 
-inline void GridMap::boundIndex(Eigen::Vector2i &id) {
+inline void GridMap::boundIndex(Eigen::Vector2i &id) const {
   Eigen::Vector2i id1;
   id1(0) = std::max(std::min(id(0), grid_geometry_.size_x - 1), 0);
   id1(1) = std::max(std::min(id(1), grid_geometry_.size_y - 1), 0);
   id = id1;
 }
+
+}  // namespace plan_env

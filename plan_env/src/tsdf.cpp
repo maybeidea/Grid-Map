@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 
+namespace plan_env {
+
 namespace tsdf {
 
 bool TsdfVolume::configure(const GridGeometry &geometry,
@@ -84,3 +86,5 @@ bool TsdfVolume::validVoxel(const Eigen::Vector3i &voxel_id) const {
 }
 
 } // namespace tsdf
+
+}  // namespace plan_env

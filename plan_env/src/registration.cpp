@@ -9,6 +9,8 @@
 #include <pcl/point_types.h>
 #include <pcl/registration/icp.h>
 
+namespace plan_env {
+
 namespace registration {
 namespace {
 
@@ -134,3 +136,5 @@ Result PointCloudRegistrationBackend::align(
 }
 
 } // namespace registration
+
+}  // namespace plan_env

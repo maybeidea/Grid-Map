@@ -4,6 +4,8 @@
 #include <cmath>
 #include <limits>
 
+namespace plan_env {
+
 namespace esdf {
 namespace {
 
@@ -188,3 +190,5 @@ bool EsdfVolume::compute(const std::vector<OccupancyVoxel> &occupancy) {
 }
 
 } // namespace esdf
+
+}  // namespace plan_env

@@ -24,6 +24,8 @@
 #include <tf2/exceptions.h>
 #else
 #include <tf2/exceptions.hpp>
+
+namespace plan_env {
 #endif
 
 namespace {
@@ -69,6 +71,31 @@ GridMap::~GridMap() {
   }
 }
 
+void GridMap::posToIndex(const Eigen::Vector3d &pos, Eigen::Vector3i &id) const {
+  if (grid_geometry_.resolution <= 0.0f) {
+    id.setConstant(INVALID_IDX);
+    return;
+  }
+  id = ((pos - grid_geometry_.origin.cast<double>()) /
+        static_cast<double>(grid_geometry_.resolution)).array().floor().cast<int>();
+}
+
+bool GridMap::isInMap(const Eigen::Vector3i &id) const {
+  return id.x() >= 0 && id.y() >= 0 && id.z() >= 0 &&
+         id.x() < grid_geometry_.size_x && id.y() < grid_geometry_.size_y &&
+         id.z() < grid_geometry_.size_z;
+}
+
+double GridMap::getResolution() const {
+  return static_cast<double>(grid_geometry_.resolution);
+}
+
+void GridMap::getRegion(Eigen::Vector3d &origin, Eigen::Vector3d &size) const {
+  origin = grid_geometry_.origin.cast<double>();
+  size = Eigen::Vector3d(grid_geometry_.size_x, grid_geometry_.size_y,
+                         grid_geometry_.size_z) * getResolution();
+}
+
 void GridMap::initMap(rclcpp::Node::SharedPtr node) {
   node_ = std::move(node);
   if (!node_) {
@@ -78,6 +105,7 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node) {
   // Keep the gate configurable without requiring callers to change the API.
   // get_parameter_or also works when a launch file did not provide overrides.
   node_->get_parameter_or("grid_map.motion_frame", motion_frame_, motion_frame_);
+  node_->get_parameter_or("grid_map.frame_id", map_frame_, map_frame_);
   node_->get_parameter_or("grid_map.motion_translation_threshold",
                           motion_translation_threshold_,
                           motion_translation_threshold_);
@@ -139,6 +167,25 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node) {
   if (!configurePointCloudFilter(cloud_leaf_size)) {
     cloud_leaf_size_ = 0.005f;
   }
+  node_->get_parameter_or("grid_map.height_map_enable", height_map_enable_,
+                          height_map_enable_);
+  node_->get_parameter_or("grid_map.height_map_topic", height_map_topic_,
+                          height_map_topic_);
+  node_->get_parameter_or("grid_map.height_map_frame", height_map_frame_,
+                          height_map_frame_);
+  node_->get_parameter_or("grid_map.height_band_z_max", height_band_z_max_,
+                          height_band_z_max_);
+  node_->get_parameter_or("grid_map.height_completeness_z_max",
+                          height_completeness_z_max_, height_completeness_z_max_);
+  node_->get_parameter_or("grid_map.height_floor_tol", height_floor_tol_,
+                          height_floor_tol_);
+  node_->get_parameter_or("grid_map.height_blocked_at_floor_threshold",
+                          height_blocked_at_floor_threshold_,
+                          height_blocked_at_floor_threshold_);
+  node_->get_parameter_or("grid_map.height_z_tcp_min", height_z_tcp_min_,
+                          height_z_tcp_min_);
+  node_->get_parameter_or("grid_map.height_ceil_threshold_open",
+                          height_ceil_threshold_open_, height_ceil_threshold_open_);
   if (!std::isfinite(motion_translation_threshold_) ||
       motion_translation_threshold_ < 0.0f) {
     motion_translation_threshold_ = 0.03f;
@@ -152,6 +199,12 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node) {
       [this](const sensor_msgs::msg::PointCloud2::ConstSharedPtr cloud) {
         pointCloudCallback(cloud);
       });
+  #ifdef PLAN_ENV_HAS_BIMAX_MSGS
+  if (height_map_enable_) {
+    height_map_pub_ = node_->create_publisher<bimax_msgs::msg::HeightMap>(
+        height_map_topic_, rclcpp::QoS(10));
+  }
+  #endif
 }
 
 bool GridMap::configureMotion(const float translation_threshold,
@@ -446,6 +499,7 @@ void GridMap::mappingLoop() {
 
     processPointCloudFrame(cloud);
     publishEsdfSnapshot();
+    publishHeightMap();
   }
 }
 
@@ -807,3 +861,14 @@ void GridMap::publishEsdfSnapshot() {
     latest_esdf_snapshot_ = std::shared_ptr<const EsdfSnapshot>(std::move(next));
   }
 }
+
+#ifndef PLAN_ENV_HAS_BIMAX_MSGS
+bool GridMap::buildHeightMapMsg(
+    bimax_msgs::msg::HeightMap &, const Eigen::Isometry3d &) {
+  return false;
+}
+
+void GridMap::publishHeightMap() {}
+#endif
+
+}  // namespace plan_env

@@ -4,6 +4,8 @@
 
 #include <functional>
 
+namespace plan_env {
+
 namespace ray_casting {
 
 using VoxelCallback =
@@ -23,3 +25,5 @@ bool traverseRay(const Eigen::Vector3f &grid_origin, float resolution,
                  const VoxelCallback &callback);
 
 } // namespace ray_casting
+
+}  // namespace plan_env

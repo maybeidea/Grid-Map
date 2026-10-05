@@ -2,6 +2,8 @@
 
 #include <cstdint>
 
+namespace plan_env {
+
 // A log-odds voxel is intentionally a small value type so snapshots can be
 // copied without depending on the fusion implementation.
 struct OccupancyVoxel {
@@ -42,3 +44,5 @@ private:
 };
 
 } // namespace occupancy
+
+}  // namespace plan_env
