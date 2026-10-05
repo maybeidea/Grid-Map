@@ -90,6 +90,55 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node) {
   if (stationary_frames > 0) {
     stationary_frames_required_ = static_cast<uint32_t>(stationary_frames);
   }
+  registration::Config registration_config = registration_backend_.config();
+  node_->get_parameter_or("grid_map.registration.enabled",
+                          registration_config.enabled,
+                          registration_config.enabled);
+  node_->get_parameter_or("grid_map.registration.max_correspondence_distance",
+                          registration_config.max_correspondence_distance,
+                          registration_config.max_correspondence_distance);
+  node_->get_parameter_or("grid_map.registration.maximum_iterations",
+                          registration_config.maximum_iterations,
+                          registration_config.maximum_iterations);
+  node_->get_parameter_or("grid_map.registration.min_overlap",
+                          registration_config.min_overlap,
+                          registration_config.min_overlap);
+  node_->get_parameter_or("grid_map.registration.max_fitness",
+                          registration_config.max_fitness,
+                          registration_config.max_fitness);
+  node_->get_parameter_or("grid_map.registration.max_translation_correction",
+                          registration_config.max_translation_correction,
+                          registration_config.max_translation_correction);
+  node_->get_parameter_or("grid_map.registration.max_rotation_correction_rad",
+                          registration_config.max_rotation_correction_rad,
+                          registration_config.max_rotation_correction_rad);
+  int min_target_points = static_cast<int>(registration_config.min_target_points);
+  node_->get_parameter_or("grid_map.registration.min_target_points",
+                          min_target_points, min_target_points);
+  if (min_target_points > 0) {
+    registration_config.min_target_points =
+        static_cast<std::size_t>(min_target_points);
+  }
+  if (!registration_backend_.configure(registration_config)) {
+    registration_backend_.configure(registration::Config{});
+  }
+  bool tsdf_enabled = tsdf_enabled_;
+  float tsdf_truncation_distance = tsdf_truncation_distance_;
+  node_->get_parameter_or("grid_map.tsdf.enabled", tsdf_enabled,
+                          tsdf_enabled);
+  node_->get_parameter_or("grid_map.tsdf.truncation_distance",
+                          tsdf_truncation_distance,
+                          tsdf_truncation_distance);
+  if (!configureTsdf(tsdf_enabled, tsdf_truncation_distance)) {
+    tsdf_enabled_ = false;
+    tsdf_truncation_distance_ = 0.05f;
+  }
+  float cloud_leaf_size = cloud_leaf_size_;
+  node_->get_parameter_or("grid_map.point_cloud_leaf_size", cloud_leaf_size,
+                          cloud_leaf_size);
+  if (!configurePointCloudFilter(cloud_leaf_size)) {
+    cloud_leaf_size_ = 0.005f;
+  }
   if (!std::isfinite(motion_translation_threshold_) ||
       motion_translation_threshold_ < 0.0f) {
     motion_translation_threshold_ = 0.03f;
@@ -183,6 +232,40 @@ bool GridMap::configureEsdf(const esdf::EsdfConfig &config) {
   return true;
 }
 
+bool GridMap::configureTsdf(const bool enabled,
+                            const float truncation_distance) {
+  if (!std::isfinite(truncation_distance) || truncation_distance <= 0.0f) {
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(task_region_mutex_);
+  if (task_region_.valid) {
+    return false;
+  }
+  tsdf_enabled_ = enabled;
+  tsdf_truncation_distance_ = truncation_distance;
+  return true;
+}
+
+bool GridMap::configurePointCloudFilter(const float leaf_size) {
+  if (!std::isfinite(leaf_size) || leaf_size <= 0.0f) {
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(task_region_mutex_);
+  if (task_region_.valid) {
+    return false;
+  }
+  cloud_leaf_size_ = leaf_size;
+  return true;
+}
+
+bool GridMap::configureRegistration(const registration::Config &config) {
+  std::lock_guard<std::mutex> lock(task_region_mutex_);
+  if (task_region_.valid) {
+    return false;
+  }
+  return registration_backend_.configure(config);
+}
+
 bool GridMap::startTaskMapping(
     const std::vector<Eigen::Vector2d>& polygon_xy,
     std::string* message_out) {
@@ -263,8 +346,12 @@ bool GridMap::startTaskMapping(
       static_cast<size_t>(grid_geometry_.size_y) *
       static_cast<size_t>(grid_geometry_.size_z);
 
-  if (!tsdf_volume_.configure(grid_geometry_)) {
-    return false;
+  if (tsdf_enabled_) {
+    if (!tsdf_volume_.configure(grid_geometry_, tsdf_truncation_distance_)) {
+      return false;
+    }
+  } else {
+    tsdf_volume_.clear();
   }
   occupancy_voxels_.assign(voxel_count, OccupancyVoxel{});
   if (!esdf_volume_.configure(grid_geometry_, esdf_config_)) {
@@ -318,6 +405,7 @@ void GridMap::clearMappingBuffers() {
   tsdf_volume_.clear();
   esdf_volume_.clear();
   occupancy_voxels_.clear();
+  registration_target_points_.clear();
 }
 
 bool GridMap::pointCloudCallback(
@@ -375,13 +463,59 @@ void GridMap::processPointCloudFrame(
     return;
   }
 
-  cloud_points_ = std::move(prepared.points);
-  camera_position_ = prepared.camera_position;
+  Eigen::Isometry3f pose = prepared.prior_pose;
+  if (mode == FusionMode::kDifferentPosition &&
+      !registerDifferentPosition(prepared, &pose)) {
+    return;
+  }
+
+  std::vector<Eigen::Vector3f> transformed_points;
+  transformed_points.reserve(prepared.sensor_points.size());
+  const TaskRegion region = taskRegion();
+  for (const auto &point : prepared.sensor_points) {
+    const Eigen::Vector3f point_map = pose * point;
+    if (region.valid &&
+        !region.contains(point_map.x(), point_map.y(), point_map.z())) {
+      continue;
+    }
+    transformed_points.push_back(point_map);
+  }
+  if (transformed_points.empty()) {
+    return;
+  }
+  cloud_points_ = std::move(transformed_points);
+  camera_position_ = pose.translation();
+  registration_target_points_.insert(registration_target_points_.end(),
+                                     cloud_points_.begin(), cloud_points_.end());
+  constexpr std::size_t kMaxRegistrationTargetPoints = 100000;
+  if (registration_target_points_.size() > kMaxRegistrationTargetPoints) {
+    const std::size_t excess = registration_target_points_.size() -
+                               kMaxRegistrationTargetPoints;
+    registration_target_points_.erase(registration_target_points_.begin(),
+                                      registration_target_points_.begin() +
+                                          static_cast<std::ptrdiff_t>(excess));
+  }
   if (mode == FusionMode::kSamePosition) {
     fuseSamePositionFrame();
   } else {
     fuseDifferentPositionFrame();
   }
+}
+
+bool GridMap::registerDifferentPosition(const PreparedCloud &prepared,
+                                        Eigen::Isometry3f *pose) {
+  if (!pose || !registration_backend_.config().enabled ||
+      registration_target_points_.size() <
+                   registration_backend_.config().min_target_points) {
+    return true;
+  }
+  const registration::Result result = registration_backend_.align(
+      prepared.sensor_points, registration_target_points_, prepared.prior_pose);
+  if (!result.accepted) {
+    return false;
+  }
+  *pose = result.pose;
+  return true;
 }
 
 bool GridMap::processPointCloud(
@@ -390,7 +524,7 @@ bool GridMap::processPointCloud(
   if (!prepared) {
     return false;
   }
-  prepared->points.clear();
+  prepared->sensor_points.clear();
   if (!cloud || cloud->data.empty() || cloud->header.frame_id.empty()) {
     return false;
   }
@@ -414,13 +548,13 @@ bool GridMap::processPointCloud(
     return false;
   }
 
-  constexpr float kCloudLeafSize = 0.1f;
   constexpr float kCloudMinRange = 0.2f;
   const Eigen::Vector3f local_update_range(5.0f, 5.0f, 3.0f);
   pcl::PointCloud<pcl::PointXYZ> filtered_cloud;
   pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
   voxel_filter.setInputCloud(finite_cloud);
-  voxel_filter.setLeafSize(kCloudLeafSize, kCloudLeafSize, kCloudLeafSize);
+  voxel_filter.setLeafSize(cloud_leaf_size_, cloud_leaf_size_,
+                           cloud_leaf_size_);
   voxel_filter.filter(filtered_cloud);
   if (filtered_cloud.empty()) {
     return false;
@@ -451,9 +585,8 @@ bool GridMap::processPointCloud(
       static_cast<float>(translation.x), static_cast<float>(translation.y),
       static_cast<float>(translation.z));
 
-  const TaskRegion region = taskRegion();
-  std::vector<Eigen::Vector3f> transformed_points;
-  transformed_points.reserve(filtered_cloud.points.size());
+  std::vector<Eigen::Vector3f> sensor_points;
+  sensor_points.reserve(filtered_cloud.points.size());
   for (const auto &point : filtered_cloud.points) {
     const Eigen::Vector3f point_camera(point.x, point.y, point.z);
     if (std::abs(point_camera.x()) >= local_update_range.x() ||
@@ -462,17 +595,16 @@ bool GridMap::processPointCloud(
         point_camera.norm() <= kCloudMinRange) {
       continue;
     }
-    const Eigen::Vector3f point_map = rotation_matrix * point_camera + translation_vector;
-    if (region.valid && !region.contains(point_map.x(), point_map.y(), point_map.z())) {
-      continue;
-    }
-    transformed_points.push_back(point_map);
+    sensor_points.push_back(point_camera);
   }
-  if (transformed_points.empty()) {
+  if (sensor_points.empty()) {
     return false;
   }
 
-  prepared->points = std::move(transformed_points);
+  prepared->sensor_points = std::move(sensor_points);
+  prepared->prior_pose = Eigen::Isometry3f::Identity();
+  prepared->prior_pose.linear() = rotation_matrix;
+  prepared->prior_pose.translation() = translation_vector;
   prepared->camera_position = translation_vector;
 
   // The chassis/base pose is the preferred motion signal. A camera-mounted
@@ -613,8 +745,7 @@ void GridMap::fuseDifferentPositionFrame() {
 }
 
 void GridMap::updateMapsFromRays() {
-  if (grid_geometry_.resolution <= 0.0f || occupancy_voxels_.empty() ||
-      tsdf_volume_.voxels().size() != occupancy_voxels_.size()) {
+  if (grid_geometry_.resolution <= 0.0f || occupancy_voxels_.empty()) {
     return;
   }
   const Eigen::Vector3i grid_size(grid_geometry_.size_x,
@@ -622,16 +753,22 @@ void GridMap::updateMapsFromRays() {
                                   grid_geometry_.size_z);
   const Eigen::Vector3f ray_origin = camera_position_;
   for (const auto &point : cloud_points_) {
+    const bool endpoint_in_grid = ray_casting::pointInGrid(
+        grid_geometry_.origin, grid_geometry_.resolution, grid_size, point);
     ray_casting::traverseRay(
         grid_geometry_.origin, grid_geometry_.resolution, grid_size,
         ray_origin, point,
-        [this, &ray_origin, &point](const Eigen::Vector3i &voxel_id, bool hit) {
+        [this, &ray_origin, &point, endpoint_in_grid](
+            const Eigen::Vector3i &voxel_id, bool hit) {
           const int address = toAddress(voxel_id);
-          if (address < 0 || static_cast<size_t>(address) >= occupancy_voxels_.size()) {
+          if (address < 0 ||
+              static_cast<size_t>(address) >= occupancy_voxels_.size()) {
             return;
           }
           updateOccupancyVoxel(occupancy_voxels_[address], hit);
-          tsdf_volume_.integrateVoxel(voxel_id, ray_origin, point);
+          if (tsdf_enabled_ && endpoint_in_grid) {
+            tsdf_volume_.integrateVoxel(voxel_id, ray_origin, point);
+          }
         });
   }
   updateEsdf();
@@ -659,6 +796,7 @@ void GridMap::publishEsdfSnapshot() {
   }
   next->esdf_voxels = esdf_volume_.voxels();
   next->camera_position = camera_position_;
+  next->tsdf_enabled = tsdf_enabled_;
   const TaskRegion region = taskRegion();
   next->task_mapping_active = region.valid;
   next->task_roi_polygon = region.expanded_polygon;

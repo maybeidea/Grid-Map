@@ -49,9 +49,21 @@ void TsdfVolume::integrateVoxel(const Eigen::Vector3i &voxel_id,
           geometry_.resolution;
   const Eigen::Vector3f direction = ray_end - ray_origin;
   const float norm = direction.norm();
-  const float projection =
-      norm > 0.0f ? (center - ray_origin).dot(direction) / norm : 0.0f;
-  const float signed_distance = norm - projection;
+  if (norm <= 0.0f) {
+    return;
+  }
+  const Eigen::Vector3f unit_direction = direction / norm;
+  const float voxel_depth = (center - ray_origin).dot(unit_direction);
+  // Positive values are in front of the measured surface and negative values
+  // are behind it. The caller normally traverses to the surface endpoint, so
+  // voxels behind the endpoint are not updated by this ray.
+  const float signed_distance = norm - voxel_depth;
+  // A projective TSDF only integrates the surface truncation band. Free-space
+  // evidence remains owned by the occupancy ray integrator.
+  if (signed_distance > truncation_distance_ ||
+      signed_distance < -truncation_distance_) {
+    return;
+  }
   const float distance = std::max(-truncation_distance_,
                                   std::min(truncation_distance_, signed_distance)) /
                          truncation_distance_;

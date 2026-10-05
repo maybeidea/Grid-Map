@@ -4,6 +4,7 @@
 #include "plan_env/esdf.hpp"
 #include "plan_env/occupancy.hpp"
 #include "plan_env/ray_casting.hpp"
+#include "plan_env/registration.hpp"
 #include "plan_env/tsdf.hpp"
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
@@ -63,6 +64,7 @@ struct EsdfSnapshot {
   std::vector<OccupancyState> occupancy_states;
   std::vector<EsdfVoxel> esdf_voxels;
   Eigen::Vector3f camera_position = Eigen::Vector3f::Zero();
+  bool tsdf_enabled = false;
   // The same expanded XY rectangle is used as the task ROI and map window.
   std::vector<Eigen::Vector2f> task_roi_polygon;
   bool task_mapping_active = false;
@@ -111,6 +113,12 @@ public:
   bool configureOccupancy(const occupancy::LogOddsConfig &config);
   // Configure occupancy-to-ESDF conversion before starting a task.
   bool configureEsdf(const esdf::EsdfConfig &config);
+  // Configure optional TSDF fusion before starting a task. Occupancy remains
+  // the collision map and is always updated when a task is active.
+  bool configureTsdf(bool enabled, float truncation_distance = 0.05f);
+  // Configure the input point-cloud downsampling leaf size.
+  bool configurePointCloudFilter(float leaf_size);
+  bool configureRegistration(const registration::Config &config);
 
   // Record a task polygon and derive one expanded rectangular ROI. This same
   // rectangle becomes both the map window and the ESDF/task ROI.
@@ -132,11 +140,12 @@ public:
 
 private:
   void mappingLoop();
-  // Point-cloud frame entry point: transform first, then run ray/map updates.
+  // Point-cloud frame entry point: register accepted frames before ray updates.
   void processPointCloudFrame(
       const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud);
   struct PreparedCloud {
-    std::vector<Eigen::Vector3f> points;
+    std::vector<Eigen::Vector3f> sensor_points;
+    Eigen::Isometry3f prior_pose = Eigen::Isometry3f::Identity();
     Eigen::Vector3f camera_position = Eigen::Vector3f::Zero();
     Eigen::Vector3f motion_position = Eigen::Vector3f::Zero();
     Eigen::Quaternionf motion_orientation = Eigen::Quaternionf::Identity();
@@ -144,10 +153,12 @@ private:
   bool processPointCloud(
       const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud,
       PreparedCloud *prepared);
+  bool registerDifferentPosition(const PreparedCloud &prepared,
+                                 Eigen::Isometry3f *pose);
   bool updateMotionState(const PreparedCloud &prepared, FusionMode *mode);
   void resetMotionState();
-  // Separate policy entry points. They currently share ray integration until
-  // the same-position and cross-position fusion rules are specified.
+  // Separate policy entry points keep temporal and cross-position fusion
+  // policies independent of the occupancy integrator.
   void fuseSamePositionFrame();
   void fuseDifferentPositionFrame();
   void updateMapsFromRays();
@@ -159,16 +170,21 @@ private:
   GridGeometry grid_geometry_;
 
   tsdf::TsdfVolume tsdf_volume_;
+  bool tsdf_enabled_ = false;
+  float tsdf_truncation_distance_ = 0.05f;
   occupancy::LogOddsModel occupancy_model_;
   esdf::EsdfConfig esdf_config_;
   std::vector<OccupancyVoxel> occupancy_voxels_;
   esdf::EsdfVolume esdf_volume_;
+  registration::PointCloudRegistrationBackend registration_backend_;
+  std::vector<Eigen::Vector3f> registration_target_points_;
 
   mutable std::mutex task_region_mutex_;
   TaskRegion task_region_;
   float resolution_ = 0.05f;
   float map_size_z_ = 0.60f;
   float expansion_margin_ = 0.25f;
+  float cloud_leaf_size_ = 0.005f;
 
   // Points retained by processPointCloud are expressed in map_frame_.
   std::vector<Eigen::Vector3f> cloud_points_;

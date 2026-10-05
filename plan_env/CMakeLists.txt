@@ -52,6 +52,7 @@ add_library(plan_env SHARED
     src/grid_map.cpp
     src/occupancy.cpp
     src/ray_casting.cpp
+    src/registration.cpp
     src/esdf.cpp
     src/tsdf.cpp
 )
