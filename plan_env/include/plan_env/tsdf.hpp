@@ -26,7 +26,8 @@ class TsdfVolume {
 public:
   TsdfVolume() = default;
 
-  bool configure(const GridGeometry &geometry, float truncation_distance = 0.20f);
+  bool configure(const GridGeometry &geometry,
+                 float truncation_distance = 0.20f);
   void clear();
 
   bool valid() const;
@@ -49,6 +50,6 @@ private:
   std::vector<TsdfVoxel> voxels_;
 };
 
-} // namespace tsdf
+}  // namespace tsdf
 
 }  // namespace plan_env

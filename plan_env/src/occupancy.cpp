@@ -24,7 +24,7 @@ bool validConfig(const LogOddsConfig &config) {
          config.occupied_threshold <= config.max_log_odds;
 }
 
-} // namespace
+}  // namespace
 
 LogOddsModel::LogOddsModel(const LogOddsConfig &config) {
   if (!configure(config)) {
@@ -40,26 +40,28 @@ bool LogOddsModel::configure(const LogOddsConfig &config) {
   return true;
 }
 
-const LogOddsConfig &LogOddsModel::config() const { return config_; }
+const LogOddsConfig &LogOddsModel::config() const {
+  return config_;
+}
 
 void LogOddsModel::update(OccupancyVoxel &voxel, const bool hit) const {
   if (hit) {
-    voxel.hit_count = static_cast<uint16_t>(std::min<uint32_t>(
-        std::numeric_limits<uint16_t>::max(),
-        static_cast<uint32_t>(voxel.hit_count) + 1));
+    voxel.hit_count = static_cast<uint16_t>(
+        std::min<uint32_t>(std::numeric_limits<uint16_t>::max(),
+                           static_cast<uint32_t>(voxel.hit_count) + 1));
   } else {
-    voxel.miss_count = static_cast<uint16_t>(std::min<uint32_t>(
-        std::numeric_limits<uint16_t>::max(),
-        static_cast<uint32_t>(voxel.miss_count) + 1));
+    voxel.miss_count = static_cast<uint16_t>(
+        std::min<uint32_t>(std::numeric_limits<uint16_t>::max(),
+                           static_cast<uint32_t>(voxel.miss_count) + 1));
   }
 
   const float increment = hit ? config_.hit_log_odds : config_.miss_log_odds;
   if (!std::isfinite(voxel.log_odds)) {
     voxel.log_odds = 0.0f;
   }
-  voxel.log_odds = std::max(
-      config_.min_log_odds,
-      std::min(config_.max_log_odds, voxel.log_odds + increment));
+  voxel.log_odds =
+      std::max(config_.min_log_odds,
+               std::min(config_.max_log_odds, voxel.log_odds + increment));
 }
 
 float LogOddsModel::probability(const OccupancyVoxel &voxel) const {
@@ -91,6 +93,6 @@ bool LogOddsModel::isOccupied(const OccupancyVoxel &voxel) const {
   return state(voxel) == OccupancyState::OCCUPIED;
 }
 
-} // namespace occupancy
+}  // namespace occupancy
 
 }  // namespace plan_env

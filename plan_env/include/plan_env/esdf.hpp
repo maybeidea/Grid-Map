@@ -16,8 +16,8 @@ namespace esdf {
 
 struct EsdfConfig {
   float max_distance = 100000.0f;
-  bool unknown_is_occupied = false;
-  bool signed_distance = false;
+  bool unknown_is_occupied = true;
+  bool signed_distance = true;
 };
 
 class EsdfVolume {
@@ -44,6 +44,6 @@ private:
   std::vector<EsdfVoxel> voxels_;
 };
 
-} // namespace esdf
+}  // namespace esdf
 
 }  // namespace plan_env

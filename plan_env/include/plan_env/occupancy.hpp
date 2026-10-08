@@ -43,6 +43,6 @@ private:
   LogOddsConfig config_;
 };
 
-} // namespace occupancy
+}  // namespace occupancy
 
 }  // namespace plan_env

@@ -17,7 +17,8 @@ bool validGeometry(const GridGeometry &geometry) {
 }
 
 // Felzenszwalb and Huttenlocher's exact 1D squared distance transform.
-void transformLine(const std::vector<float> &input, std::vector<float> *output) {
+void transformLine(const std::vector<float> &input,
+                   std::vector<float> *output) {
   const int n = static_cast<int>(input.size());
   output->assign(input.size(), kInfinity);
   if (n == 0) {
@@ -46,8 +47,7 @@ void transformLine(const std::vector<float> &input, std::vector<float> *output) 
       if (intersection <= boundaries[envelope_size]) {
         --envelope_size;
       }
-    } while (envelope_size >= 0 &&
-             intersection <= boundaries[envelope_size]);
+    } while (envelope_size >= 0 && intersection <= boundaries[envelope_size]);
     ++envelope_size;
     envelope[envelope_size] = q;
     boundaries[envelope_size] = intersection;
@@ -62,8 +62,7 @@ void transformLine(const std::vector<float> &input, std::vector<float> *output) 
       ++k;
     }
     const float delta = static_cast<float>(q - envelope[k]);
-    (*output)[static_cast<std::size_t>(q)] =
-        delta * delta + input[envelope[k]];
+    (*output)[static_cast<std::size_t>(q)] = delta * delta + input[envelope[k]];
   }
 }
 
@@ -78,33 +77,45 @@ void transformVolume(std::vector<float> *distance, int sx, int sy, int sz) {
   for (int y = 0; y < sy; ++y) {
     for (int z = 0; z < sz; ++z) {
       input.clear();
-      for (int x = 0; x < sx; ++x) input.push_back((*distance)[address(x, y, z)]);
+      for (int x = 0; x < sx; ++x) {
+        input.push_back((*distance)[address(x, y, z)]);
+      }
       transformLine(input, &output);
-      for (int x = 0; x < sx; ++x) (*distance)[address(x, y, z)] = output[x];
+      for (int x = 0; x < sx; ++x) {
+        (*distance)[address(x, y, z)] = output[x];
+      }
     }
   }
   for (int x = 0; x < sx; ++x) {
     for (int z = 0; z < sz; ++z) {
       input.clear();
-      for (int y = 0; y < sy; ++y) input.push_back((*distance)[address(x, y, z)]);
+      for (int y = 0; y < sy; ++y) {
+        input.push_back((*distance)[address(x, y, z)]);
+      }
       transformLine(input, &output);
-      for (int y = 0; y < sy; ++y) (*distance)[address(x, y, z)] = output[y];
+      for (int y = 0; y < sy; ++y) {
+        (*distance)[address(x, y, z)] = output[y];
+      }
     }
   }
   for (int x = 0; x < sx; ++x) {
     for (int y = 0; y < sy; ++y) {
       input.clear();
-      for (int z = 0; z < sz; ++z) input.push_back((*distance)[address(x, y, z)]);
+      for (int z = 0; z < sz; ++z) {
+        input.push_back((*distance)[address(x, y, z)]);
+      }
       transformLine(input, &output);
-      for (int z = 0; z < sz; ++z) (*distance)[address(x, y, z)] = output[z];
+      for (int z = 0; z < sz; ++z) {
+        (*distance)[address(x, y, z)] = output[z];
+      }
     }
   }
 }
 
-} // namespace
+}  // namespace
 
 bool EsdfVolume::configure(const GridGeometry &geometry,
-                            const EsdfConfig &config) {
+                           const EsdfConfig &config) {
   if (!validGeometry(geometry) || !std::isfinite(config.max_distance) ||
       config.max_distance < 0.0f) {
     return false;
@@ -123,13 +134,21 @@ void EsdfVolume::clear() {
   voxels_.clear();
 }
 
-bool EsdfVolume::valid() const { return validGeometry(geometry_) && !voxels_.empty(); }
+bool EsdfVolume::valid() const {
+  return validGeometry(geometry_) && !voxels_.empty();
+}
 
-const GridGeometry &EsdfVolume::geometry() const { return geometry_; }
+const GridGeometry &EsdfVolume::geometry() const {
+  return geometry_;
+}
 
-const std::vector<EsdfVoxel> &EsdfVolume::voxels() const { return voxels_; }
+const std::vector<EsdfVoxel> &EsdfVolume::voxels() const {
+  return voxels_;
+}
 
-std::vector<EsdfVoxel> &EsdfVolume::voxels() { return voxels_; }
+std::vector<EsdfVoxel> &EsdfVolume::voxels() {
+  return voxels_;
+}
 
 bool EsdfVolume::compute(const std::vector<OccupancyVoxel> &occupancy,
                          const occupancy::LogOddsModel &model) {
@@ -173,10 +192,10 @@ bool EsdfVolume::compute(const std::vector<OccupancyVoxel> &occupancy,
       const OccupancyState state = model.state(occupancy[i]);
       if (state == OccupancyState::OCCUPIED ||
           (config_.unknown_is_occupied && state == OccupancyState::UNKNOWN)) {
-        const float value = std::isfinite(distance_to_free[i])
-                                ? std::sqrt(distance_to_free[i]) *
-                                      geometry_.resolution
-                                : config_.max_distance;
+        const float value =
+            std::isfinite(distance_to_free[i])
+                ? std::sqrt(distance_to_free[i]) * geometry_.resolution
+                : config_.max_distance;
         voxels_[i].distance = -std::min(config_.max_distance, value);
       }
     }
@@ -189,6 +208,6 @@ bool EsdfVolume::compute(const std::vector<OccupancyVoxel> &occupancy) {
   return compute(occupancy, default_model);
 }
 
-} // namespace esdf
+}  // namespace esdf
 
 }  // namespace plan_env

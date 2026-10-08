@@ -41,7 +41,7 @@ find_package(sensor_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 
-# 必须放 PCL 前面
+# PCL's VTK dependencies require the MPI C target.
 find_package(MPI REQUIRED COMPONENTS C)
 
 find_package(Eigen3 REQUIRED)
@@ -51,6 +51,11 @@ find_package(Threads REQUIRED)
 
 add_library(plan_env SHARED
     src/grid_map.cpp
+    src/grid_map_cloud.cpp
+    src/grid_map_motion.cpp
+    src/grid_map_query.cpp
+    src/grid_map_snapshot.cpp
+    src/height_map.cpp
     src/occupancy.cpp
     src/ray_casting.cpp
     src/registration.cpp
@@ -72,7 +77,7 @@ target_link_libraries(plan_env PRIVATE
 )
 
 if(COMMAND ament_target_dependencies)
-  ament_target_dependencies(plan_env
+  ament_target_dependencies(plan_env PUBLIC
       geometry_msgs
       pcl_conversions
       rclcpp
@@ -92,9 +97,14 @@ else()
 endif()
 
 if(bimax_msgs_FOUND)
-  target_sources(plan_env PRIVATE src/height_map.cpp)
   target_compile_definitions(plan_env PUBLIC PLAN_ENV_HAS_BIMAX_MSGS=1)
-  ament_target_dependencies(plan_env bimax_msgs)
+  ament_target_dependencies(plan_env PUBLIC bimax_msgs)
+endif()
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(grid_map_query_test test/grid_map_query_test.cpp)
+  target_link_libraries(grid_map_query_test plan_env ${PCL_LIBRARIES})
 endif()
 
 install(TARGETS plan_env

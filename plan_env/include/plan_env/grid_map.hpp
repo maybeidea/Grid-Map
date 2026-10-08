@@ -1,11 +1,10 @@
-#include <Eigen/Eigen>
+#pragma once
+
+#include <Eigen/Core>
 #include <Eigen/Geometry>
-#include <pcl/point_cloud.h>
-#include <pcl/point_types.h>
 #include "plan_env/esdf.hpp"
 #include "plan_env/height_map.hpp"
 #include "plan_env/occupancy.hpp"
-#include "plan_env/ray_casting.hpp"
 #include "plan_env/registration.hpp"
 #include "plan_env/tsdf.hpp"
 #include <rclcpp/rclcpp.hpp>
@@ -13,7 +12,11 @@
 #ifdef PLAN_ENV_HAS_BIMAX_MSGS
 #include <bimax_msgs/msg/height_map.hpp>
 #else
-namespace bimax_msgs { namespace msg { struct HeightMap; } }
+namespace bimax_msgs {
+namespace msg {
+struct HeightMap;
+}
+}  // namespace bimax_msgs
 #endif
 #if __has_include(<tf2_ros/buffer.hpp>)
 #include <tf2_ros/buffer.hpp>
@@ -29,7 +32,6 @@ namespace bimax_msgs { namespace msg { struct HeightMap; } }
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
-#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -38,6 +40,7 @@ namespace bimax_msgs { namespace msg { struct HeightMap; } }
 
 namespace plan_env {
 
+// Compatibility placeholder for clients of the original map interface.
 struct QualityVoxel {};
 
 /** Mapping gate driven by consecutive timestamped TF poses. */
@@ -115,7 +118,15 @@ public:
 
   void posToIndex(const Eigen::Vector3d &pos, Eigen::Vector3i &id) const;
   bool isInMap(const Eigen::Vector3i &id) const;
+  bool isInMap(const Eigen::Vector2i &id) const;
+  bool isInMap(const Eigen::Vector3d &pos) const;
+  bool isInMap(const Eigen::Vector2d &pos) const;
+  Eigen::Vector2i pos2dToIndex(const Eigen::Vector2d &pos) const;
+  void indexToPos(const Eigen::Vector3i &id, Eigen::Vector3d &pos) const;
+  Eigen::Vector2d index2dToPos(const Eigen::Vector2i &id) const;
   double getResolution() const;
+  Eigen::Vector3d getOrigin() const;
+  void getVoxelNum(Eigen::Vector3i &voxel_num) const;
   void getRegion(Eigen::Vector3d &origin, Eigen::Vector3d &size) const;
   void boundIndex(Eigen::Vector3i &id) const;
   void boundIndex(Eigen::Vector2i &id) const;
@@ -123,8 +134,7 @@ public:
   // Configure the voxel map before starting a task. The task ROI is supplied
   // later through startTaskMapping(), so one GridMap instance can be reused.
   bool configure(float resolution, float map_size_z,
-                 float expansion_margin = 0.25f,
-                 float expansion_ratio = 0.10f);
+                 float expansion_margin = 0.25f, float expansion_ratio = 0.10f);
 
   // Configure the sensor update increments and occupancy decision thresholds.
   bool configureOccupancy(const occupancy::LogOddsConfig &config);
@@ -143,10 +153,35 @@ public:
                         std::string *message_out = nullptr);
   void stopTaskMapping();
   bool isTaskMappingActive() const;
+  bool isMappingReadyForPlanning() const;
   TaskRegion taskRegion() const;
   bool pointInTaskRegion(float x, float y, float z) const;
 
   std::shared_ptr<const EsdfSnapshot> snapshot() const;
+  double getDistance(const Eigen::Vector3d &pos) const;
+  double getDistance(const Eigen::Vector3i &id) const;
+  double getPreciseDistance(const Eigen::Vector3d &pos) const;
+  int getOccupancy(const Eigen::Vector3d &pos) const;
+  int getOccupancy(const Eigen::Vector3i &id) const;
+  bool isUnknown(const Eigen::Vector3i &id) const;
+  bool isUnknown(const Eigen::Vector3d &pos) const;
+  bool isKnownFree(const Eigen::Vector3i &id) const;
+  bool isKnownOccupied(const Eigen::Vector3i &id) const;
+  bool isKnownOccupied(const Eigen::Vector3d &pos) const;
+
+  void freezeOccupancyAndEsdf();
+  void captureEsdfFreezing();
+  void clearEsdfFreezing();
+  bool hasEsdfFreezing() const;
+  void setEsdfFreezingQueryActive(bool active);
+  bool esdfFreezingQueryActive() const;
+  bool buildEsdfFreezingSliceCloud(
+      sensor_msgs::msg::PointCloud2 &cloud_msg) const;
+  bool buildEsdfFreezingVolumeCloud(
+      sensor_msgs::msg::PointCloud2 &cloud_msg) const;
+  bool saveEsdfSnapshot(const std::string &output_dir, const std::string &tag,
+                        std::string *saved_basename_out = nullptr,
+                        bool save_local3d = true, bool save_slice = true) const;
 
   /** Configure the pose gate. Values are per-cloud pose deltas. */
   bool configureMotion(float translation_threshold = 0.03f,
@@ -156,9 +191,18 @@ public:
   bool readyToMove() const;
   bool buildHeightMapMsg(bimax_msgs::msg::HeightMap &msg,
                          const Eigen::Isometry3d &T_map_from_height);
+  bool buildHeightMapMsg(bimax_msgs::msg::HeightMap &msg);
   void publishHeightMap();
 
+  // Legacy planner adapters; no A* storage or odometry timeout is maintained.
+  void resetAstarBuffer();
+  bool isInTaskPessimismPolygon(double x, double y) const;
+  bool odomValid() const;
+  bool getOdomDepthTimeout() const;
+
 private:
+  // Select one immutable snapshot for the entire query.
+  std::shared_ptr<const EsdfSnapshot> querySnapshot() const;
   void mappingLoop();
   // Point-cloud frame entry point: register accepted frames before ray updates.
   void processPointCloudFrame(
@@ -166,7 +210,6 @@ private:
   struct PreparedCloud {
     std::vector<Eigen::Vector3f> sensor_points;
     Eigen::Isometry3f prior_pose = Eigen::Isometry3f::Identity();
-    Eigen::Vector3f camera_position = Eigen::Vector3f::Zero();
     Eigen::Vector3f motion_position = Eigen::Vector3f::Zero();
     Eigen::Quaternionf motion_orientation = Eigen::Quaternionf::Identity();
   };
@@ -182,8 +225,6 @@ private:
   void fuseSamePositionFrame();
   void fuseDifferentPositionFrame();
   void updateMapsFromRays();
-  void updateOccupancyVoxel(OccupancyVoxel &voxel, bool hit);
-  void updateEsdf();
   void publishEsdfSnapshot();
   void clearMappingBuffers();
 
@@ -211,7 +252,7 @@ private:
   double height_band_z_max_ = 0.50;
   double height_completeness_z_max_ = 0.20;
   double height_floor_tol_ = 0.02;
-  double height_blocked_at_floor_threshold_ = 0.04;
+  double height_vision_limit_ = 0.10;
   double height_z_tcp_min_ = 0.07;
   double height_ceil_threshold_open_ = 0.50;
 
@@ -239,6 +280,8 @@ private:
   uint64_t snapshot_version_ = 0;
   mutable std::mutex snapshot_mutex_;
   std::shared_ptr<const EsdfSnapshot> latest_esdf_snapshot_;
+  std::shared_ptr<const EsdfSnapshot> frozen_esdf_snapshot_;
+  bool esdf_freezing_query_active_ = false;
 
   mutable std::mutex motion_mutex_;
   MotionState motion_state_ = MotionState::kWaitingForPose;
@@ -246,7 +289,8 @@ private:
   Eigen::Vector3f last_motion_position_ = Eigen::Vector3f::Zero();
   Eigen::Quaternionf last_motion_orientation_ = Eigen::Quaternionf::Identity();
   Eigen::Vector3f stationary_anchor_position_ = Eigen::Vector3f::Zero();
-  Eigen::Quaternionf stationary_anchor_orientation_ = Eigen::Quaternionf::Identity();
+  Eigen::Quaternionf stationary_anchor_orientation_ =
+      Eigen::Quaternionf::Identity();
   bool has_last_motion_pose_ = false;
   bool has_stationary_anchor_ = false;
   bool awaiting_new_position_ = false;
@@ -258,40 +302,13 @@ private:
   float motion_translation_threshold_ = 0.03f;
   float motion_rotation_threshold_rad_ = 0.02f;
 
-  inline int toAddress(const Eigen::Vector3i &id) const;
-  inline int toAddress(int x, int y, int z) const;
-  inline int toAddress2d(int x, int y) const;
+  int toAddress(const Eigen::Vector3i &id) const {
+    return toAddress(id.x(), id.y(), id.z());
+  }
+
+  int toAddress(int x, int y, int z) const {
+    return (x * grid_geometry_.size_y + y) * grid_geometry_.size_z + z;
+  }
 };
-/* ============================== definition of inline function
- * ============================== */
-
-inline int GridMap::toAddress(const Eigen::Vector3i &id) const {
-  return id(0) * grid_geometry_.size_y * grid_geometry_.size_z +
-         id(1) * grid_geometry_.size_z + id(2);
-}
-
-inline int GridMap::toAddress(int x, int y, int z) const {
-  return x * grid_geometry_.size_y * grid_geometry_.size_z +
-         y * grid_geometry_.size_z + z;
-}
-
-inline int GridMap::toAddress2d(int x, int y) const {
-  return x * grid_geometry_.size_y + y;
-}
-
-inline void GridMap::boundIndex(Eigen::Vector3i &id) const {
-  Eigen::Vector3i id1;
-  id1(0) = std::max(std::min(id(0), grid_geometry_.size_x - 1), 0);
-  id1(1) = std::max(std::min(id(1), grid_geometry_.size_y - 1), 0);
-  id1(2) = std::max(std::min(id(2), grid_geometry_.size_z - 1), 0);
-  id = id1;
-}
-
-inline void GridMap::boundIndex(Eigen::Vector2i &id) const {
-  Eigen::Vector2i id1;
-  id1(0) = std::max(std::min(id(0), grid_geometry_.size_x - 1), 0);
-  id1(1) = std::max(std::min(id(1), grid_geometry_.size_y - 1), 0);
-  id = id1;
-}
 
 }  // namespace plan_env

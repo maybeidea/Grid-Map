@@ -53,7 +53,7 @@ int voxelCoordinate(const float coordinate, const float origin,
   return std::max(0, std::min(index, size - 1));
 }
 
-} // namespace
+}  // namespace
 
 bool pointInGrid(const Eigen::Vector3f &grid_origin, const float resolution,
                  const Eigen::Vector3i &grid_size,
@@ -102,15 +102,20 @@ bool traverseRay(const Eigen::Vector3f &grid_origin, const float resolution,
   Eigen::Vector3i last;
   for (int axis = 0; axis < 3; ++axis) {
     voxel[axis] = voxelCoordinate(start[axis], grid_origin[axis], resolution,
-                                   grid_size[axis]);
-    last[axis] = voxelCoordinate(finish[axis], grid_origin[axis], resolution,
                                   grid_size[axis]);
+    last[axis] = voxelCoordinate(finish[axis], grid_origin[axis], resolution,
+                                 grid_size[axis]);
   }
 
-  const Eigen::Vector3i step_direction(
-      direction.x() > 1e-7f ? 1 : direction.x() < -1e-7f ? -1 : 0,
-      direction.y() > 1e-7f ? 1 : direction.y() < -1e-7f ? -1 : 0,
-      direction.z() > 1e-7f ? 1 : direction.z() < -1e-7f ? -1 : 0);
+  const Eigen::Vector3i step_direction(direction.x() > 1e-7f    ? 1
+                                       : direction.x() < -1e-7f ? -1
+                                                                : 0,
+                                       direction.y() > 1e-7f    ? 1
+                                       : direction.y() < -1e-7f ? -1
+                                                                : 0,
+                                       direction.z() > 1e-7f    ? 1
+                                       : direction.z() < -1e-7f ? -1
+                                                                : 0);
   Eigen::Vector3f t_next;
   Eigen::Vector3f t_delta;
   const float infinity = std::numeric_limits<float>::infinity();
@@ -121,9 +126,9 @@ bool traverseRay(const Eigen::Vector3f &grid_origin, const float resolution,
       continue;
     }
     const float boundary =
-        grid_origin[axis] +
-        (step_direction[axis] > 0 ? (voxel[axis] + 1) * resolution
-                                   : voxel[axis] * resolution);
+        grid_origin[axis] + (step_direction[axis] > 0
+                                 ? (voxel[axis] + 1) * resolution
+                                 : voxel[axis] * resolution);
     t_next[axis] = (boundary - start[axis]) / direction[axis];
     t_delta[axis] = resolution / std::abs(direction[axis]);
     if (t_next[axis] < 0.0f) {
@@ -154,6 +159,6 @@ bool traverseRay(const Eigen::Vector3f &grid_origin, const float resolution,
   return true;
 }
 
-} // namespace ray_casting
+}  // namespace ray_casting
 
 }  // namespace plan_env

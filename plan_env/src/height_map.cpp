@@ -1,12 +1,19 @@
 #include "plan_env/grid_map.hpp"
+#include "plan_env/height_map.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
 
 #include <geometry_msgs/msg/transform_stamped.hpp>
+#if __has_include(<tf2/exceptions.hpp>)
+#include <tf2/exceptions.hpp>
+#else
 #include <tf2/exceptions.h>
+#endif
 #include <tf2/time.h>
+
+#ifdef PLAN_ENV_HAS_BIMAX_MSGS
 
 namespace plan_env {
 
@@ -19,10 +26,11 @@ void zBounds(const GridMap &map, const double z_max, int *z0, int *z1) {
   const double resolution = map.getResolution();
   Eigen::Vector3i low;
   Eigen::Vector3i high;
-  map.posToIndex(origin + Eigen::Vector3d(0.5 * resolution,
-                                           0.5 * resolution, 0.0), low);
-  map.posToIndex(origin + Eigen::Vector3d(0.5 * resolution,
-                                           0.5 * resolution, z_max), high);
+  map.posToIndex(
+      origin + Eigen::Vector3d(0.5 * resolution, 0.5 * resolution, 0.0), low);
+  map.posToIndex(origin +
+                     Eigen::Vector3d(0.5 * resolution, 0.5 * resolution, z_max),
+                 high);
   map.boundIndex(low);
   map.boundIndex(high);
   *z0 = std::min(low.z(), high.z());
@@ -31,9 +39,8 @@ void zBounds(const GridMap &map, const double z_max, int *z0, int *z1) {
 
 }  // namespace
 
-bool GridMap::buildHeightMapMsg(
-    bimax_msgs::msg::HeightMap &msg,
-    const Eigen::Isometry3d &T_map_from_height) {
+bool GridMap::buildHeightMapMsg(bimax_msgs::msg::HeightMap &msg,
+                                const Eigen::Isometry3d &T_map_from_height) {
   if (!isTaskMappingActive() || grid_geometry_.size_x <= 0 ||
       grid_geometry_.size_y <= 0 || occupancy_voxels_.empty()) {
     return false;
@@ -43,9 +50,8 @@ bool GridMap::buildHeightMapMsg(
   const int height = grid_geometry_.size_y;
   const std::size_t count = static_cast<std::size_t>(width) * height;
   const double resolution = grid_geometry_.resolution;
-  const HeightBandParams band{0.0, height_floor_tol_,
-                              height_blocked_at_floor_threshold_,
-                              height_z_tcp_min_, height_ceil_threshold_open_};
+  const HeightBandParams band{0.0, height_floor_tol_, height_z_tcp_min_, 0.10,
+                              height_ceil_threshold_open_};
 
   int z0_status = 0;
   int z1_status = 0;
@@ -86,9 +92,11 @@ bool GridMap::buildHeightMapMsg(
 
       int known = 0;
       for (int z = z0_complete; z <= z1_complete; ++z) {
-        const OccupancyState state = occupancy_model_.state(
-            occupancy_voxels_[static_cast<std::size_t>(toAddress(id.x(), id.y(), z))]);
-        if (state == OccupancyState::FREE || state == OccupancyState::OCCUPIED) {
+        const OccupancyState state =
+            occupancy_model_.state(occupancy_voxels_[static_cast<std::size_t>(
+                toAddress(id.x(), id.y(), z))]);
+        if (state == OccupancyState::FREE ||
+            state == OccupancyState::OCCUPIED) {
           ++known;
         }
       }
@@ -99,11 +107,13 @@ bool GridMap::buildHeightMapMsg(
       bool free = false;
       double lowest = std::numeric_limits<double>::infinity();
       for (int z = z0_status; z <= z1_status; ++z) {
-        const OccupancyState state = occupancy_model_.state(
-            occupancy_voxels_[static_cast<std::size_t>(toAddress(id.x(), id.y(), z))]);
+        const OccupancyState state =
+            occupancy_model_.state(occupancy_voxels_[static_cast<std::size_t>(
+                toAddress(id.x(), id.y(), z))]);
         if (state == OccupancyState::OCCUPIED) {
           const double relative_z = (z + 0.5) * resolution +
-                                    grid_geometry_.origin.z() - band.ground_height;
+                                    grid_geometry_.origin.z() -
+                                    band.ground_height;
           if (occupiedCountsForHeight(relative_z, band)) {
             occupied = true;
             lowest = std::min(lowest, relative_z);
@@ -113,15 +123,18 @@ bool GridMap::buildHeightMapMsg(
         }
       }
       msg.status[flat] = classifyHeightColumn(occupied, free, lowest, band);
-      if (occupied &&
-          (msg.status[flat] == HeightStatus::kLowClearance ||
-           (msg.status[flat] == HeightStatus::kOpen &&
-            lowest >= band.ceil_threshold_open))) {
+      if (occupied && (msg.status[flat] == HeightStatus::kBaseOpen ||
+                       (msg.status[flat] == HeightStatus::kAllOpen &&
+                        lowest >= band.ceil_threshold_open))) {
         msg.h_ceil[flat] = static_cast<float>(lowest);
       }
     }
   }
   return true;
+}
+
+bool GridMap::buildHeightMapMsg(bimax_msgs::msg::HeightMap &msg) {
+  return buildHeightMapMsg(msg, Eigen::Isometry3d::Identity());
 }
 
 void GridMap::publishHeightMap() {
@@ -154,3 +167,22 @@ void GridMap::publishHeightMap() {
 }
 
 }  // namespace plan_env
+
+#else
+
+namespace plan_env {
+
+bool GridMap::buildHeightMapMsg(bimax_msgs::msg::HeightMap &,
+                                const Eigen::Isometry3d &) {
+  return false;
+}
+
+bool GridMap::buildHeightMapMsg(bimax_msgs::msg::HeightMap &) {
+  return false;
+}
+
+void GridMap::publishHeightMap() {}
+
+}  // namespace plan_env
+
+#endif

@@ -52,6 +52,6 @@ private:
   Config config_;
 };
 
-} // namespace registration
+}  // namespace registration
 
 }  // namespace plan_env

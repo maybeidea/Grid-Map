@@ -21,9 +21,8 @@ bool pointInGrid(const Eigen::Vector3f &grid_origin, float resolution,
 bool traverseRay(const Eigen::Vector3f &grid_origin, float resolution,
                  const Eigen::Vector3i &grid_size,
                  const Eigen::Vector3f &ray_origin,
-                 const Eigen::Vector3f &ray_end,
-                 const VoxelCallback &callback);
+                 const Eigen::Vector3f &ray_end, const VoxelCallback &callback);
 
-} // namespace ray_casting
+}  // namespace ray_casting
 
 }  // namespace plan_env

@@ -32,16 +32,23 @@ bool TsdfVolume::valid() const {
   return geometry_.resolution > 0.0f && !voxels_.empty();
 }
 
-const GridGeometry &TsdfVolume::geometry() const { return geometry_; }
+const GridGeometry &TsdfVolume::geometry() const {
+  return geometry_;
+}
 
-const std::vector<TsdfVoxel> &TsdfVolume::voxels() const { return voxels_; }
+const std::vector<TsdfVoxel> &TsdfVolume::voxels() const {
+  return voxels_;
+}
 
-std::vector<TsdfVoxel> &TsdfVolume::voxels() { return voxels_; }
+std::vector<TsdfVoxel> &TsdfVolume::voxels() {
+  return voxels_;
+}
 
 void TsdfVolume::integrateVoxel(const Eigen::Vector3i &voxel_id,
                                 const Eigen::Vector3f &ray_origin,
                                 const Eigen::Vector3f &ray_end) {
-  if (!validVoxel(voxel_id) || !ray_origin.allFinite() || !ray_end.allFinite()) {
+  if (!validVoxel(voxel_id) || !ray_origin.allFinite() ||
+      !ray_end.allFinite()) {
     return;
   }
   TsdfVoxel &voxel = voxels_[static_cast<std::size_t>(toAddress(voxel_id))];
@@ -66,9 +73,10 @@ void TsdfVolume::integrateVoxel(const Eigen::Vector3i &voxel_id,
       signed_distance < -truncation_distance_) {
     return;
   }
-  const float distance = std::max(-truncation_distance_,
-                                  std::min(truncation_distance_, signed_distance)) /
-                         truncation_distance_;
+  const float distance =
+      std::max(-truncation_distance_,
+               std::min(truncation_distance_, signed_distance)) /
+      truncation_distance_;
   const float new_weight = voxel.weight + 1.0f;
   voxel.distance = (voxel.distance * voxel.weight + distance) / new_weight;
   voxel.weight = new_weight;
@@ -85,6 +93,6 @@ bool TsdfVolume::validVoxel(const Eigen::Vector3i &voxel_id) const {
          voxel_id.z() >= 0 && voxel_id.z() < geometry_.size_z;
 }
 
-} // namespace tsdf
+}  // namespace tsdf
 
 }  // namespace plan_env

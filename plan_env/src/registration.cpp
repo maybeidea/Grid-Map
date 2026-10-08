@@ -32,7 +32,7 @@ bool validConfig(const Config &config) {
          config.min_target_points > 0;
 }
 
-} // namespace
+}  // namespace
 
 PointCloudRegistrationBackend::PointCloudRegistrationBackend(
     const Config &config) {
@@ -49,7 +49,9 @@ bool PointCloudRegistrationBackend::configure(const Config &config) {
   return true;
 }
 
-const Config &PointCloudRegistrationBackend::config() const { return config_; }
+const Config &PointCloudRegistrationBackend::config() const {
+  return config_;
+}
 
 Result PointCloudRegistrationBackend::align(
     const std::vector<Eigen::Vector3f> &source,
@@ -119,14 +121,13 @@ Result PointCloudRegistrationBackend::align(
   for (const auto &point : aligned.points) {
     if (tree.nearestKSearch(point, 1, indices, distances) > 0 &&
         distances[0] <= config_.max_correspondence_distance *
-                             config_.max_correspondence_distance) {
+                            config_.max_correspondence_distance) {
       ++matches;
     }
   }
-  result.overlap = aligned.empty()
-                       ? 0.0f
-                       : static_cast<float>(matches) /
-                             static_cast<float>(aligned.size());
+  result.overlap = aligned.empty() ? 0.0f
+                                   : static_cast<float>(matches) /
+                                         static_cast<float>(aligned.size());
   result.accepted =
       std::isfinite(result.fitness) && result.fitness <= config_.max_fitness &&
       result.overlap >= config_.min_overlap &&
@@ -135,6 +136,6 @@ Result PointCloudRegistrationBackend::align(
   return result;
 }
 
-} // namespace registration
+}  // namespace registration
 
 }  // namespace plan_env
