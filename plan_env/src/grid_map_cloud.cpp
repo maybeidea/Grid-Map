@@ -134,30 +134,33 @@ void GridMap::mappingLoop() {
       pending_cloud_.reset();
     }
 
-    processPointCloudFrame(cloud);
-    publishEsdfSnapshot();
-    publishHeightMap();
+    if (processPointCloudFrame(cloud)) {
+      // ESDF and HeightMap are refreshed once per completed stationary
+      // position, rather than once per input cloud.
+      publishEsdfSnapshot();
+      publishHeightMap();
+    }
   }
 }
 
-void GridMap::processPointCloudFrame(
+bool GridMap::processPointCloudFrame(
     const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud) {
   PreparedCloud prepared;
   if (!processPointCloud(cloud, &prepared)) {
-    return;
+    return false;
   }
 
   FusionMode mode = FusionMode::kSamePosition;
   if (!updateMotionState(prepared, &mode)) {
     // A cloud can still be transformed while the robot is moving, but it is
     // intentionally not committed to cloud_points_ or to any map layer.
-    return;
+    return false;
   }
 
   Eigen::Isometry3f pose = prepared.prior_pose;
   if (mode == FusionMode::kDifferentPosition &&
       !registerDifferentPosition(prepared, &pose)) {
-    return;
+    return false;
   }
 
   std::vector<Eigen::Vector3f> transformed_points;
@@ -172,7 +175,7 @@ void GridMap::processPointCloudFrame(
     transformed_points.push_back(point_map);
   }
   if (transformed_points.empty()) {
-    return;
+    return false;
   }
   cloud_points_ = std::move(transformed_points);
   camera_position_ = pose.translation();
@@ -187,11 +190,16 @@ void GridMap::processPointCloudFrame(
                                       registration_target_points_.begin() +
                                           static_cast<std::ptrdiff_t>(excess));
   }
-  if (mode == FusionMode::kSamePosition) {
-    fuseSamePositionFrame();
-  } else {
-    fuseDifferentPositionFrame();
+  const bool fused = mode == FusionMode::kSamePosition
+                         ? fuseSamePositionFrame()
+                         : fuseDifferentPositionFrame();
+  if (!fused || !recordSuccessfulFusion()) {
+    return false;
   }
+
+  // The distance field is intentionally recomputed only after the current
+  // stationary position has accumulated its successful fusion quota.
+  return esdf_volume_.compute(occupancy_voxels_, occupancy_model_);
 }
 
 bool GridMap::registerDifferentPosition(const PreparedCloud &prepared,
@@ -328,51 +336,59 @@ bool GridMap::processPointCloud(
   return true;
 }
 
-void GridMap::fuseSamePositionFrame() {
+bool GridMap::fuseSamePositionFrame() {
   // Temporal fusion at one stationary pose.
+  if (!updateMapsFromRays()) {
+    return false;
+  }
   {
     std::lock_guard<std::mutex> lock(motion_mutex_);
     ++same_position_fused_frames_;
   }
-  updateMapsFromRays();
+  return true;
 }
 
-void GridMap::fuseDifferentPositionFrame() {
+bool GridMap::fuseDifferentPositionFrame() {
   // Cross-position fusion uses the same integrator after registration.
+  if (!updateMapsFromRays()) {
+    return false;
+  }
   {
     std::lock_guard<std::mutex> lock(motion_mutex_);
     ++different_position_fused_frames_;
   }
-  updateMapsFromRays();
+  return true;
 }
 
-void GridMap::updateMapsFromRays() {
+bool GridMap::updateMapsFromRays() {
   if (grid_geometry_.resolution <= 0.0f || occupancy_voxels_.empty()) {
-    return;
+    return false;
   }
   const Eigen::Vector3i grid_size(grid_geometry_.size_x, grid_geometry_.size_y,
                                   grid_geometry_.size_z);
   const Eigen::Vector3f ray_origin = camera_position_;
+  bool integrated_voxel = false;
   for (const auto &point : cloud_points_) {
     const bool endpoint_in_grid = ray_casting::pointInGrid(
         grid_geometry_.origin, grid_geometry_.resolution, grid_size, point);
     ray_casting::traverseRay(
         grid_geometry_.origin, grid_geometry_.resolution, grid_size, ray_origin,
         point,
-        [this, &ray_origin, &point,
+        [this, &ray_origin, &point, &integrated_voxel,
          endpoint_in_grid](const Eigen::Vector3i &voxel_id, bool hit) {
           const int address = toAddress(voxel_id);
           if (address < 0 ||
               static_cast<size_t>(address) >= occupancy_voxels_.size()) {
             return;
           }
+          integrated_voxel = true;
           occupancy_model_.update(occupancy_voxels_[address], hit);
           if (tsdf_enabled_ && endpoint_in_grid) {
             tsdf_volume_.integrateVoxel(voxel_id, ray_origin, point);
           }
         });
   }
-  esdf_volume_.compute(occupancy_voxels_, occupancy_model_);
+  return integrated_voxel;
 }
 
 }  // namespace plan_env

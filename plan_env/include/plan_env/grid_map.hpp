@@ -205,7 +205,9 @@ private:
   std::shared_ptr<const EsdfSnapshot> querySnapshot() const;
   void mappingLoop();
   // Point-cloud frame entry point: register accepted frames before ray updates.
-  void processPointCloudFrame(
+  // Returns true only when this frame completes the configured fusion quota
+  // for the current stationary position.
+  bool processPointCloudFrame(
       const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud);
   struct PreparedCloud {
     std::vector<Eigen::Vector3f> sensor_points;
@@ -222,9 +224,10 @@ private:
   void resetMotionState();
   // Separate policy entry points keep temporal and cross-position fusion
   // policies independent of the occupancy integrator.
-  void fuseSamePositionFrame();
-  void fuseDifferentPositionFrame();
-  void updateMapsFromRays();
+  bool fuseSamePositionFrame();
+  bool fuseDifferentPositionFrame();
+  bool updateMapsFromRays();
+  bool recordSuccessfulFusion();
   void publishEsdfSnapshot();
   void clearMappingBuffers();
 

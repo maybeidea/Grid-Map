@@ -104,6 +104,25 @@ endif()
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(grid_map_query_test test/grid_map_query_test.cpp)
+  if(COMMAND ament_target_dependencies)
+    ament_target_dependencies(grid_map_query_test
+        geometry_msgs
+        pcl_conversions
+        rclcpp
+        sensor_msgs
+        tf2
+        tf2_ros
+    )
+  else()
+    target_link_libraries(grid_map_query_test
+        ${geometry_msgs_TARGETS}
+        ${pcl_conversions_TARGETS}
+        ${rclcpp_TARGETS}
+        ${sensor_msgs_TARGETS}
+        ${tf2_TARGETS}
+        ${tf2_ros_TARGETS}
+    )
+  endif()
   target_link_libraries(grid_map_query_test plan_env ${PCL_LIBRARIES})
 endif()
 

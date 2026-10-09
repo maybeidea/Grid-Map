@@ -65,8 +65,8 @@ TEST_F(GridMapQueryTest, voxelCentersRoundTripInTwoAndThreeDimensions) {
 }
 
 TEST_F(GridMapQueryTest, frozenQueriesKeepTheirGeometryWhenTheLiveTaskChanges) {
-  ASSERT_TRUE(processCloud(true));  // Establish the first pose.
-  ASSERT_TRUE(processCloud(true));  // Fuse one stationary observation.
+  EXPECT_FALSE(processCloud(true));  // Establish the first pose.
+  ASSERT_TRUE(processCloud(true));    // Complete one-fusion position.
   const Eigen::Vector3d occupied(0.625, 0.125, 0.375);
   const Eigen::Vector3i index(6, 4, 1);
   ASSERT_EQ(1, map_->getOccupancy(occupied));
@@ -80,7 +80,7 @@ TEST_F(GridMapQueryTest, frozenQueriesKeepTheirGeometryWhenTheLiveTaskChanges) {
   map_->stopTaskMapping();
   ASSERT_TRUE(map_->configure(0.5f, 1.0f, 0.0f));
   ASSERT_TRUE(map_->startTaskMapping({{10, 10}, {11, 10}, {11, 11}, {10, 11}}));
-  ASSERT_TRUE(processCloud(false));
+  EXPECT_FALSE(processCloud(false));  // No fusion, no position-complete update.
 
   EXPECT_EQ(1, map_->getOccupancy(index));
   EXPECT_EQ(1, map_->getOccupancy(occupied));
@@ -97,12 +97,15 @@ TEST_F(GridMapQueryTest, frozenQueriesKeepTheirGeometryWhenTheLiveTaskChanges) {
   map_->clearEsdfFreezing();
   EXPECT_FALSE(map_->hasEsdfFreezing());
   EXPECT_FALSE(map_->esdfFreezingQueryActive());
-  EXPECT_EQ(-1, map_->getOccupancy(occupied));
-  EXPECT_DOUBLE_EQ(100000.0, map_->getDistance(occupied));
+  // The live ESDF snapshot is also held until the new position completes its
+  // fusion quota, so clearing the frozen override reveals the last published
+  // snapshot rather than a partially updated map.
+  EXPECT_EQ(1, map_->getOccupancy(occupied));
+  EXPECT_DOUBLE_EQ(distance, map_->getDistance(occupied));
 }
 
 TEST_F(GridMapQueryTest, preciseDistanceInterpolatesVoxelCenters) {
-  ASSERT_TRUE(processCloud(true));
+  EXPECT_FALSE(processCloud(true));
   ASSERT_TRUE(processCloud(true));
   const auto snapshot = map_->snapshot();
   double expected = 0.0;

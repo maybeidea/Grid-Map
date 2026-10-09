@@ -122,12 +122,23 @@ bool GridMap::updateMotionState(const PreparedCloud &prepared,
     *mode = FusionMode::kSamePosition;
   }
 
-  ++stationary_frame_count_;
-  motion_state_ = stationary_frame_count_ >= stationary_frames_required_
-                      ? MotionState::kReadyToMove
-                      : MotionState::kStationaryCollecting;
+  // The quota is advanced only after the map integrator confirms that this
+  // cloud was actually fused. This function only admits the candidate frame.
+  motion_state_ = MotionState::kStationaryCollecting;
   last_fusion_mode_ = *mode;
   return true;
+}
+
+bool GridMap::recordSuccessfulFusion() {
+  std::lock_guard<std::mutex> lock(motion_mutex_);
+  ++stationary_frame_count_;
+  if (stationary_frame_count_ >= stationary_frames_required_) {
+    stationary_frame_count_ = stationary_frames_required_;
+    motion_state_ = MotionState::kReadyToMove;
+    return true;
+  }
+  motion_state_ = MotionState::kStationaryCollecting;
+  return false;
 }
 
 }  // namespace plan_env

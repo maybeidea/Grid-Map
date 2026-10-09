@@ -11,7 +11,11 @@
 #else
 #include <tf2/exceptions.h>
 #endif
+#if __has_include(<tf2/time.hpp>)
+#include <tf2/time.hpp>
+#else
 #include <tf2/time.h>
+#endif
 
 #ifdef PLAN_ENV_HAS_BIMAX_MSGS
 
