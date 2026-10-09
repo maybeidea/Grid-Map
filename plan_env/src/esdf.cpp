@@ -117,7 +117,8 @@ void transformVolume(std::vector<float> *distance, int sx, int sy, int sz) {
 bool EsdfVolume::configure(const GridGeometry &geometry,
                            const EsdfConfig &config) {
   if (!validGeometry(geometry) || !std::isfinite(config.max_distance) ||
-      config.max_distance < 0.0f) {
+      config.max_distance < 0.0f || std::isnan(config.unknown_z_min) ||
+      std::isnan(config.unknown_z_max) || config.unknown_z_min > config.unknown_z_max) {
     return false;
   }
   geometry_ = geometry;
@@ -160,11 +161,20 @@ bool EsdfVolume::compute(const std::vector<OccupancyVoxel> &occupancy,
   const int sy = geometry_.size_y;
   const int sz = geometry_.size_z;
   const std::size_t count = voxels_.size();
+  const double z_min = std::floor(
+      (static_cast<double>(config_.unknown_z_min) - geometry_.origin.z()) / geometry_.resolution);
+  const double z_max = std::floor(
+      (static_cast<double>(config_.unknown_z_max) - geometry_.origin.z()) / geometry_.resolution);
+  const auto is_source = [&](std::size_t i) {
+    const auto state = model.state(occupancy[i]);
+    const int z = static_cast<int>(i % static_cast<std::size_t>(sz));
+    return state == OccupancyState::OCCUPIED ||
+           (config_.unknown_is_occupied && state == OccupancyState::UNKNOWN &&
+            z >= z_min && z <= z_max);
+  };
   std::vector<float> distance(count, kInfinity);
   for (std::size_t i = 0; i < count; ++i) {
-    const OccupancyState state = model.state(occupancy[i]);
-    if (state == OccupancyState::OCCUPIED ||
-        (config_.unknown_is_occupied && state == OccupancyState::UNKNOWN)) {
+    if (is_source(i)) {
       distance[i] = 0.0f;
     }
   }
@@ -181,17 +191,13 @@ bool EsdfVolume::compute(const std::vector<OccupancyVoxel> &occupancy,
   if (config_.signed_distance) {
     std::vector<float> distance_to_free(count, kInfinity);
     for (std::size_t i = 0; i < count; ++i) {
-      const OccupancyState state = model.state(occupancy[i]);
-      if (state == OccupancyState::FREE ||
-          (!config_.unknown_is_occupied && state == OccupancyState::UNKNOWN)) {
+      if (!is_source(i)) {
         distance_to_free[i] = 0.0f;
       }
     }
     transformVolume(&distance_to_free, sx, sy, sz);
     for (std::size_t i = 0; i < count; ++i) {
-      const OccupancyState state = model.state(occupancy[i]);
-      if (state == OccupancyState::OCCUPIED ||
-          (config_.unknown_is_occupied && state == OccupancyState::UNKNOWN)) {
+      if (is_source(i)) {
         const float value =
             std::isfinite(distance_to_free[i])
                 ? std::sqrt(distance_to_free[i]) * geometry_.resolution

@@ -201,9 +201,12 @@ public:
   bool getOdomDepthTimeout() const;
 
 private:
+  friend struct GridMapTestAccess;
   // Select one immutable snapshot for the entire query.
   std::shared_ptr<const EsdfSnapshot> querySnapshot() const;
   void mappingLoop();
+  bool processQueuedCloud(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud,
+                          uint64_t generation);
   // Point-cloud frame entry point: register accepted frames before ray updates.
   // Returns true only when this frame completes the configured fusion quota
   // for the current stationary position.
@@ -230,6 +233,8 @@ private:
   bool recordSuccessfulFusion();
   void publishEsdfSnapshot();
   void clearMappingBuffers();
+  void invalidateTaskSnapshots();
+  void setCloudAdmission(bool enabled);
 
   GridGeometry grid_geometry_;
 
@@ -243,12 +248,19 @@ private:
   registration::PointCloudRegistrationBackend registration_backend_;
   std::vector<Eigen::Vector3f> registration_target_points_;
 
-  mutable std::mutex task_region_mutex_;
+  // Lock order: task state -> motion/snapshot/mailbox. The worker releases
+  // the mailbox before taking task state. Recursive for public query helpers.
+  mutable std::recursive_mutex task_region_mutex_;
+  uint64_t task_generation_ = 0;
   TaskRegion task_region_;
   float resolution_ = 0.05f;
   float map_size_z_ = 0.60f;
   float expansion_margin_ = 0.25f;
   float cloud_leaf_size_ = 0.005f;
+  double cloud_min_map_z_ = 0.02;
+  bool cloud_low_z_clear_rays_ = false;
+  double cloud_min_range_ = 0.2;
+  Eigen::Vector3f local_update_range_{5.0f, 5.0f, 3.0f};
   bool height_map_enable_ = true;
   std::string height_map_topic_ = "/complex_area_plan/height";
   std::string height_map_frame_ = "base_footprint";
@@ -261,6 +273,7 @@ private:
 
   // Points retained by processPointCloud are expressed in map_frame_.
   std::vector<Eigen::Vector3f> cloud_points_;
+  Eigen::Isometry3f station_pose_correction_ = Eigen::Isometry3f::Identity();
   Eigen::Vector3f camera_position_ = Eigen::Vector3f::Zero();
   std::string map_frame_ = "map";
   // Base pose is preferred for motion gating so arm/camera motion does not
@@ -277,6 +290,8 @@ private:
   std::mutex pending_cloud_mutex_;
   std::condition_variable pending_cloud_cv_;
   sensor_msgs::msg::PointCloud2::ConstSharedPtr pending_cloud_;
+  uint64_t pending_cloud_generation_ = 0;
+  bool accepting_clouds_ = false;
   bool stopping_ = false;
   std::thread mapping_thread_;
 
@@ -285,6 +300,7 @@ private:
   std::shared_ptr<const EsdfSnapshot> latest_esdf_snapshot_;
   std::shared_ptr<const EsdfSnapshot> frozen_esdf_snapshot_;
   bool esdf_freezing_query_active_ = false;
+  bool occupancy_updates_enabled_ = true;
 
   mutable std::mutex motion_mutex_;
   MotionState motion_state_ = MotionState::kWaitingForPose;

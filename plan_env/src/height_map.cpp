@@ -45,7 +45,8 @@ void zBounds(const GridMap &map, const double z_max, int *z0, int *z1) {
 
 bool GridMap::buildHeightMapMsg(bimax_msgs::msg::HeightMap &msg,
                                 const Eigen::Isometry3d &T_map_from_height) {
-  if (!isTaskMappingActive() || grid_geometry_.size_x <= 0 ||
+  std::lock_guard<std::recursive_mutex> state_lock(task_region_mutex_);
+  if (!isMappingReadyForPlanning() || grid_geometry_.size_x <= 0 ||
       grid_geometry_.size_y <= 0 || occupancy_voxels_.empty()) {
     return false;
   }
@@ -142,6 +143,7 @@ bool GridMap::buildHeightMapMsg(bimax_msgs::msg::HeightMap &msg) {
 }
 
 void GridMap::publishHeightMap() {
+  std::lock_guard<std::recursive_mutex> state_lock(task_region_mutex_);
   if (!height_map_enable_ || !height_map_pub_ ||
       height_map_pub_->get_subscription_count() == 0 || !node_) {
     return;

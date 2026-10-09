@@ -36,6 +36,7 @@ GridMap::GridMap()
           std::make_shared<rclcpp::Clock>(RCL_ROS_TIME))),
       tf_listener_(std::make_shared<tf2_ros::TransformListener>(*tf_buffer_)),
       latest_esdf_snapshot_(std::make_shared<EsdfSnapshot>()) {
+  grid_geometry_.resolution = resolution_;
   mapping_thread_ = std::thread(&GridMap::mappingLoop, this);
 }
 
@@ -60,18 +61,19 @@ bool GridMap::configure(const float resolution, const float map_size_z,
       !std::isfinite(expansion_ratio) || expansion_ratio < 0.0f) {
     return false;
   }
-  std::lock_guard<std::mutex> lock(task_region_mutex_);
+  std::lock_guard<std::recursive_mutex> lock(task_region_mutex_);
   if (task_region_.valid) {
     return false;
   }
   resolution_ = resolution;
+  grid_geometry_.resolution = resolution;
   map_size_z_ = map_size_z;
   expansion_margin_ = expansion_margin;
   return true;
 }
 
 bool GridMap::configureOccupancy(const occupancy::LogOddsConfig &config) {
-  std::lock_guard<std::mutex> lock(task_region_mutex_);
+  std::lock_guard<std::recursive_mutex> lock(task_region_mutex_);
   if (task_region_.valid) {
     return false;
   }
@@ -79,13 +81,15 @@ bool GridMap::configureOccupancy(const occupancy::LogOddsConfig &config) {
 }
 
 bool GridMap::configureEsdf(const esdf::EsdfConfig &config) {
-  std::lock_guard<std::mutex> lock(task_region_mutex_);
+  std::lock_guard<std::recursive_mutex> lock(task_region_mutex_);
   if (task_region_.valid) {
     return false;
   }
   // Validate without changing the active volume. The volume is configured
   // with this saved policy when the next task ROI is started.
-  if (!std::isfinite(config.max_distance) || config.max_distance < 0.0f) {
+  if (!std::isfinite(config.max_distance) || config.max_distance < 0.0f ||
+      std::isnan(config.unknown_z_min) || std::isnan(config.unknown_z_max) ||
+      config.unknown_z_min > config.unknown_z_max) {
     return false;
   }
   esdf_config_ = config;
@@ -97,7 +101,7 @@ bool GridMap::configureTsdf(const bool enabled,
   if (!std::isfinite(truncation_distance) || truncation_distance <= 0.0f) {
     return false;
   }
-  std::lock_guard<std::mutex> lock(task_region_mutex_);
+  std::lock_guard<std::recursive_mutex> lock(task_region_mutex_);
   if (task_region_.valid) {
     return false;
   }
@@ -110,7 +114,7 @@ bool GridMap::configurePointCloudFilter(const float leaf_size) {
   if (!std::isfinite(leaf_size) || leaf_size <= 0.0f) {
     return false;
   }
-  std::lock_guard<std::mutex> lock(task_region_mutex_);
+  std::lock_guard<std::recursive_mutex> lock(task_region_mutex_);
   if (task_region_.valid) {
     return false;
   }
@@ -119,7 +123,7 @@ bool GridMap::configurePointCloudFilter(const float leaf_size) {
 }
 
 bool GridMap::configureRegistration(const registration::Config &config) {
-  std::lock_guard<std::mutex> lock(task_region_mutex_);
+  std::lock_guard<std::recursive_mutex> lock(task_region_mutex_);
   if (task_region_.valid) {
     return false;
   }
@@ -149,6 +153,7 @@ bool GridMap::startTaskMapping(const std::vector<Eigen::Vector2d> &polygon_xy,
     max_y = std::max(max_y, p.y());
   }
 
+  std::lock_guard<std::recursive_mutex> lock(task_region_mutex_);
   const double margin = static_cast<double>(expansion_margin_);
   min_x -= margin;
   min_y -= margin;
@@ -158,10 +163,9 @@ bool GridMap::startTaskMapping(const std::vector<Eigen::Vector2d> &polygon_xy,
   const double width = max_x - min_x;
   const double height = max_y - min_y;
 
-  std::lock_guard<std::mutex> lock(task_region_mutex_);
-
+  invalidateTaskSnapshots();
   task_region_ = TaskRegion{};
-  task_region_.valid = true;
+  // Activate only after all volumes have been allocated successfully.
   task_region_.min = {static_cast<float>(min_x), static_cast<float>(min_y)};
   task_region_.z_min = 0.0f;
   task_region_.z_max = map_size_z_;
@@ -199,6 +203,7 @@ bool GridMap::startTaskMapping(const std::vector<Eigen::Vector2d> &polygon_xy,
 
   if (tsdf_enabled_) {
     if (!tsdf_volume_.configure(grid_geometry_, tsdf_truncation_distance_)) {
+      stopTaskMapping();
       return false;
     }
   } else {
@@ -206,11 +211,12 @@ bool GridMap::startTaskMapping(const std::vector<Eigen::Vector2d> &polygon_xy,
   }
   occupancy_voxels_.assign(voxel_count, OccupancyVoxel{});
   if (!esdf_volume_.configure(grid_geometry_, esdf_config_)) {
-    occupancy_voxels_.clear();
-    tsdf_volume_.clear();
+    stopTaskMapping();
     return false;
   }
   cloud_points_.clear();
+  task_region_.valid = true;
+  setCloudAdmission(true);
 
   if (message_out) {
     std::ostringstream stream;
@@ -227,27 +233,50 @@ bool GridMap::startTaskMapping(const std::vector<Eigen::Vector2d> &polygon_xy,
 }
 
 void GridMap::stopTaskMapping() {
-  std::lock_guard<std::mutex> lock(task_region_mutex_);
+  std::lock_guard<std::recursive_mutex> lock(task_region_mutex_);
+  invalidateTaskSnapshots();
   task_region_ = TaskRegion{};
   clearMappingBuffers();
   resetMotionState();
   grid_geometry_ = GridGeometry{};
+  grid_geometry_.resolution = resolution_;
 }
 
 bool GridMap::isTaskMappingActive() const {
-  std::lock_guard<std::mutex> lock(task_region_mutex_);
+  std::lock_guard<std::recursive_mutex> lock(task_region_mutex_);
   return task_region_.valid;
 }
 
 TaskRegion GridMap::taskRegion() const {
-  std::lock_guard<std::mutex> lock(task_region_mutex_);
+  std::lock_guard<std::recursive_mutex> lock(task_region_mutex_);
   return task_region_;
 }
 
 bool GridMap::pointInTaskRegion(const float x, const float y,
                                 const float z) const {
-  std::lock_guard<std::mutex> lock(task_region_mutex_);
+  std::lock_guard<std::recursive_mutex> lock(task_region_mutex_);
   return task_region_.contains(x, y, z);
+}
+
+void GridMap::setCloudAdmission(const bool enabled) {
+  // Caller holds task state; the ROS callback only needs this short mailbox lock.
+  std::lock_guard<std::mutex> lock(pending_cloud_mutex_);
+  accepting_clouds_ = enabled;
+  pending_cloud_generation_ = task_generation_;
+  if (!enabled) pending_cloud_.reset();
+}
+
+void GridMap::invalidateTaskSnapshots() {
+  // Caller holds task_region_mutex_; no old frame may enter a new task.
+  ++task_generation_;
+  occupancy_updates_enabled_ = true;
+  setCloudAdmission(false);
+  auto empty = std::make_shared<EsdfSnapshot>();
+  empty->version = ++snapshot_version_;
+  std::lock_guard<std::mutex> lock(snapshot_mutex_);
+  latest_esdf_snapshot_ = empty;
+  frozen_esdf_snapshot_.reset();
+  esdf_freezing_query_active_ = false;
 }
 
 void GridMap::clearMappingBuffers() {
@@ -255,6 +284,7 @@ void GridMap::clearMappingBuffers() {
   esdf_volume_.clear();
   occupancy_voxels_.clear();
   registration_target_points_.clear();
+  cloud_points_.clear();
 }
 
 }  // namespace plan_env

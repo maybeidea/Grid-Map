@@ -4,6 +4,7 @@
 #include "plan_env/tsdf.hpp"
 
 #include <cstddef>
+#include <limits>
 #include <vector>
 
 namespace plan_env {
@@ -18,6 +19,10 @@ struct EsdfConfig {
   float max_distance = 100000.0f;
   bool unknown_is_occupied = true;
   bool signed_distance = true;
+  // Map-frame height band for unknown sources. Infinite bounds implement all.
+  // Bounds select voxel layers like the legacy floor(z / resolution) policy.
+  float unknown_z_min = -std::numeric_limits<float>::infinity();
+  float unknown_z_max = std::numeric_limits<float>::infinity();
 };
 
 class EsdfVolume {

@@ -6,3 +6,4 @@ log/
 __pycache__/
 AGENTS.md
 docs/
+COLCON_IGNORE
