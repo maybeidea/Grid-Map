@@ -191,6 +191,29 @@ TEST_F(GridMapQueryTest, translationAndRotationResumeAtThreeSuccessiveStops) {
   EXPECT_TRUE(map_->readyToMove());
 }
 
+TEST_F(GridMapQueryTest, minimumStationaryPrefixPublishesBeforeUpperQuota) {
+  ASSERT_TRUE(map_->configureMotion(0.03f, 0.02f, 5, 2));
+  EXPECT_FALSE(frame());
+  EXPECT_FALSE(frame());
+  EXPECT_EQ(1u, map_->mappingStatus().stationary_frame_count);
+  EXPECT_FALSE(map_->isMappingReadyForPlanning());
+
+  ASSERT_TRUE(frame());
+  EXPECT_EQ(2u, map_->mappingStatus().stationary_frame_count);
+  EXPECT_TRUE(map_->isMappingReadyForPlanning());
+  const auto early_version = map_->snapshot()->version;
+
+  ASSERT_TRUE(frame());
+  EXPECT_GT(map_->snapshot()->version, early_version);
+  EXPECT_EQ(3u, map_->mappingStatus().stationary_frame_count);
+  EXPECT_TRUE(map_->readyToMove());
+
+  ASSERT_TRUE(frame());
+  ASSERT_TRUE(frame());
+  EXPECT_EQ(5u, map_->mappingStatus().stationary_frame_count);
+  EXPECT_EQ(MotionState::kReadyToMove, map_->mappingStatus().motion_state);
+}
+
 TEST_F(GridMapQueryTest, cumulativeDriftInterruptsQuotaAndResetsNewStop) {
   ASSERT_TRUE(map_->configureMotion(0.03f, 0.02f, 3));
   EXPECT_FALSE(frame());
@@ -308,6 +331,29 @@ TEST_F(GridMapQueryTest, legacyGroundFilterDropsOrClearsWithoutCreatingHit) {
     EXPECT_EQ(clear ? 0 : -1, map_->getOccupancy(Eigen::Vector3d(0.625, 0.125, 0.1)));
     EXPECT_EQ(clear ? 1u : 0u, map_->mappingStatus().stationary_frame_count);
   }
+}
+
+TEST_F(GridMapQueryTest, emptyOccupiedVolumeStillPublishesValidSnapshot) {
+  rclcpp::NodeOptions options;
+  options.append_parameter_override("grid_map.resolution", 0.25);
+  options.append_parameter_override("grid_map.map_size_z", 1.0);
+  options.append_parameter_override("grid_map.cloud_min_map_z", 0.2);
+  options.append_parameter_override("grid_map.cloud_low_z_clear_rays", true);
+  options.append_parameter_override("grid_map.stationary_frames", 1);
+  map_->initMap(std::make_shared<rclcpp::Node>("empty_frozen_volume", options));
+  start();
+  EXPECT_FALSE(frame(0, 0, {{0.625f, 0.125f, 0.1f}}));
+  ASSERT_TRUE(frame(0, 0, {{0.625f, 0.125f, 0.1f}}));
+  map_->captureEsdfFreezing();
+  ASSERT_TRUE(map_->hasEsdfFreezing());
+  sensor_msgs::msg::PointCloud2 cloud;
+  ASSERT_TRUE(map_->buildEsdfFreezingVolumeCloud(cloud));
+  EXPECT_EQ(0u, cloud.width);
+  EXPECT_EQ(1u, cloud.height);
+  EXPECT_FALSE(cloud.header.frame_id.empty());
+  EXPECT_EQ(4u, cloud.fields.size());
+  map_->stopTaskMapping();
+  EXPECT_FALSE(map_->buildEsdfFreezingVolumeCloud(cloud));
 }
 
 TEST_F(GridMapQueryTest, unknownHeightBandOnlyLimitsUnknownSources) {

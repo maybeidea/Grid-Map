@@ -61,6 +61,7 @@ struct MappingStatus {
   MotionState motion_state = MotionState::kWaitingForPose;
   FusionMode last_fusion_mode = FusionMode::kSamePosition;
   uint32_t stationary_frame_count = 0;
+  uint32_t stationary_frames_min = 5;
   uint32_t stationary_frames_required = 30;
   uint64_t position_index = 0;
   uint64_t same_position_fused_frames = 0;
@@ -186,7 +187,8 @@ public:
   /** Configure the pose gate. Values are per-cloud pose deltas. */
   bool configureMotion(float translation_threshold = 0.03f,
                        float rotation_threshold_rad = 0.02f,
-                       uint32_t stationary_frames = 30);
+                       uint32_t stationary_frames = 30,
+                       uint32_t stationary_frames_min = 0);
   MappingStatus mappingStatus() const;
   bool readyToMove() const;
   bool buildHeightMapMsg(bimax_msgs::msg::HeightMap &msg,
@@ -208,8 +210,8 @@ private:
   bool processQueuedCloud(const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud,
                           uint64_t generation);
   // Point-cloud frame entry point: register accepted frames before ray updates.
-  // Returns true only when this frame completes the configured fusion quota
-  // for the current stationary position.
+  // Returns true for every successfully fused frame. ESDF snapshots are
+  // published after the minimum stationary-frame quota is reached.
   bool processPointCloudFrame(
       const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud);
   struct PreparedCloud {
@@ -231,6 +233,7 @@ private:
   bool fuseDifferentPositionFrame();
   bool updateMapsFromRays();
   bool recordSuccessfulFusion();
+  bool hasMinimumStationaryFrames() const;
   void publishEsdfSnapshot();
   void clearMappingBuffers();
   void invalidateTaskSnapshots();
@@ -276,6 +279,7 @@ private:
   Eigen::Isometry3f station_pose_correction_ = Eigen::Isometry3f::Identity();
   Eigen::Vector3f camera_position_ = Eigen::Vector3f::Zero();
   std::string map_frame_ = "map";
+  std::string cloud_topic_ = "grid_map/cloud";
   // Base pose is preferred for motion gating so arm/camera motion does not
   // look like chassis motion. If unavailable, the cloud frame pose is used.
   std::string motion_frame_ = "base_footprint";
@@ -314,6 +318,7 @@ private:
   bool has_stationary_anchor_ = false;
   bool awaiting_new_position_ = false;
   uint32_t stationary_frame_count_ = 0;
+  uint32_t stationary_frames_min_ = 5;
   uint32_t stationary_frames_required_ = 30;
   uint64_t position_index_ = 0;
   uint64_t same_position_fused_frames_ = 0;

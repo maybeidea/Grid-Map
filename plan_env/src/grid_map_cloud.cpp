@@ -21,17 +21,16 @@ namespace plan_env {
 namespace {
 
 float probabilityToLogOdds(const double probability, const double fallback) {
-  const double p = std::isfinite(probability) && probability > 0.0 &&
-                           probability < 1.0
-                       ? probability
-                       : fallback;
+  const double p =
+      std::isfinite(probability) && probability > 0.0 && probability < 1.0
+          ? probability
+          : fallback;
   return static_cast<float>(std::log(p / (1.0 - p)));
 }
 
 template <typename T>
 T getParameterWithLegacyAlias(const rclcpp::Node::SharedPtr &node,
-                              const char *legacy_name,
-                              const char *current_name,
+                              const char *legacy_name, const char *current_name,
                               const T &default_value) {
   if (node && node->has_parameter(legacy_name)) {
     return node->get_parameter(legacy_name).get_value<T>();
@@ -69,13 +68,13 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node) {
   // from the task polygon by the new map, while resolution and Z extent keep
   // their original grid_map parameter names.
   const double legacy_resolution =
-      declare_or_get_parameter<double>(node_, "grid_map.resolution", 0.05);
+      declare_or_get_parameter<double>(node_, "grid_map.resolution", 0.01);
   const double legacy_map_size_z =
-      declare_or_get_parameter<double>(node_, "grid_map.map_size_z", 0.60);
+      declare_or_get_parameter<double>(node_, "grid_map.map_size_z", 0.20);
   const double expansion_margin = declare_or_get_parameter<double>(
-      node_, "grid_map.expansion_margin", 0.25);
-  const double expansion_ratio = declare_or_get_parameter<double>(
-      node_, "grid_map.expansion_ratio", 0.10);
+      node_, "grid_map.expansion_margin", 0.8);
+  const double expansion_ratio =
+      declare_or_get_parameter<double>(node_, "grid_map.expansion_ratio", 0.10);
   if (!configure(static_cast<float>(legacy_resolution),
                  static_cast<float>(legacy_map_size_z),
                  static_cast<float>(expansion_margin),
@@ -86,16 +85,16 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node) {
                 resolution_, map_size_z_);
   }
 
-  const double p_hit = declare_or_get_parameter<double>(
-      node_, "grid_map.p_hit", 0.70);
-  const double p_miss = declare_or_get_parameter<double>(
-      node_, "grid_map.p_miss", 0.35);
-  const double p_min = declare_or_get_parameter<double>(
-      node_, "grid_map.p_min", 0.12);
-  const double p_max = declare_or_get_parameter<double>(
-      node_, "grid_map.p_max", 0.97);
-  const double p_occ = declare_or_get_parameter<double>(
-      node_, "grid_map.p_occ", 0.80);
+  const double p_hit =
+      declare_or_get_parameter<double>(node_, "grid_map.p_hit", 0.70);
+  const double p_miss =
+      declare_or_get_parameter<double>(node_, "grid_map.p_miss", 0.35);
+  const double p_min =
+      declare_or_get_parameter<double>(node_, "grid_map.p_min", 0.12);
+  const double p_max =
+      declare_or_get_parameter<double>(node_, "grid_map.p_max", 0.97);
+  const double p_occ =
+      declare_or_get_parameter<double>(node_, "grid_map.p_occ", 0.80);
   occupancy::LogOddsConfig occupancy_config;
   occupancy_config.hit_log_odds = probabilityToLogOdds(p_hit, 0.70);
   occupancy_config.miss_log_odds = probabilityToLogOdds(p_miss, 0.35);
@@ -106,8 +105,9 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node) {
   // p_occ as known-free. A zero boundary preserves that behavior for misses.
   occupancy_config.free_threshold = 0.0f;
   if (!configureOccupancy(occupancy_config)) {
-    RCLCPP_WARN(node_->get_logger(),
-                "GridMap: invalid occupancy probability parameters; using defaults");
+    RCLCPP_WARN(
+        node_->get_logger(),
+        "GridMap: invalid occupancy probability parameters; using defaults");
     configureOccupancy(occupancy::LogOddsConfig{});
   }
 
@@ -115,16 +115,18 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node) {
       node_, "grid_map.esdf_unknown_mode", "task_roi");
   esdf::EsdfConfig esdf_config;
   esdf_config.unknown_is_occupied = unknown_mode != "off";
-  const double roi_z_max = declare_or_get_parameter<double>(
-      node_, "grid_map.esdf_roi_z_max", 0.50);
-  const double ground_height = declare_or_get_parameter<double>(
-      node_, "grid_map.ground_height", 0.0);
+  const double roi_z_max =
+      declare_or_get_parameter<double>(node_, "grid_map.esdf_roi_z_max", 0.50);
+  const double ground_height =
+      declare_or_get_parameter<double>(node_, "grid_map.ground_height", 0.0);
   if (unknown_mode != "all") {
     esdf_config.unknown_z_min = static_cast<float>(ground_height);
     esdf_config.unknown_z_max = static_cast<float>(roi_z_max);
   }
-  if (unknown_mode != "off" && unknown_mode != "task_roi" && unknown_mode != "all") {
-    RCLCPP_WARN(node_->get_logger(), "GridMap: unknown esdf_unknown_mode '%s'; using task_roi",
+  if (unknown_mode != "off" && unknown_mode != "task_roi" &&
+      unknown_mode != "all") {
+    RCLCPP_WARN(node_->get_logger(),
+                "GridMap: unknown esdf_unknown_mode '%s'; using task_roi",
                 unknown_mode.c_str());
   }
   esdf_config.signed_distance = declare_or_get_parameter<bool>(
@@ -144,13 +146,19 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node) {
   parameter("grid_map.local_update_range_x", local_update_range_.x());
   parameter("grid_map.local_update_range_y", local_update_range_.y());
   parameter("grid_map.local_update_range_z", local_update_range_.z());
-  if (!std::isfinite(cloud_min_map_z_)) cloud_min_map_z_ = 0.02;
-  if (!std::isfinite(cloud_min_range_) || cloud_min_range_ < 0.0) cloud_min_range_ = 0.2;
-  if (!local_update_range_.allFinite() || (local_update_range_.array() <= 0.0f).any()) {
+  if (!std::isfinite(cloud_min_map_z_)) {
+    cloud_min_map_z_ = 0.02;
+  }
+  if (!std::isfinite(cloud_min_range_) || cloud_min_range_ < 0.0) {
+    cloud_min_range_ = 0.2;
+  }
+  if (!local_update_range_.allFinite() ||
+      (local_update_range_.array() <= 0.0f).any()) {
     local_update_range_ = Eigen::Vector3f(5.0f, 5.0f, 3.0f);
   }
   parameter("grid_map.motion_frame", motion_frame_);
   parameter("grid_map.frame_id", map_frame_);
+  parameter("grid_map.cloud_topic", cloud_topic_);
   parameter("grid_map.motion_translation_threshold",
             motion_translation_threshold_);
   parameter("grid_map.motion_rotation_threshold_rad",
@@ -159,6 +167,19 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node) {
   parameter("grid_map.stationary_frames", stationary_frames);
   if (stationary_frames > 0) {
     stationary_frames_required_ = static_cast<uint32_t>(stationary_frames);
+  }
+  int stationary_frames_min = static_cast<int>(stationary_frames_min_);
+  parameter("grid_map.stationary_frames_min", stationary_frames_min);
+  if (stationary_frames_min > 0) {
+    stationary_frames_min_ = static_cast<uint32_t>(stationary_frames_min);
+  }
+  if (stationary_frames_min_ > stationary_frames_required_) {
+    RCLCPP_WARN(
+        node_->get_logger(),
+        "GridMap: stationary_frames_min=%u exceeds stationary_frames=%u; "
+        "clamping minimum to the upper quota",
+        stationary_frames_min_, stationary_frames_required_);
+    stationary_frames_min_ = stationary_frames_required_;
   }
   registration::Config registration_config = registration_backend_.config();
   parameter("grid_map.registration.enabled", registration_config.enabled);
@@ -216,10 +237,12 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node) {
     motion_rotation_threshold_rad_ = 0.02f;
   }
   cloud_sub_ = node_->create_subscription<sensor_msgs::msg::PointCloud2>(
-      "grid_map/cloud", rclcpp::SensorDataQoS(),
+      cloud_topic_, rclcpp::SensorDataQoS(),
       [this](const sensor_msgs::msg::PointCloud2::ConstSharedPtr cloud) {
         pointCloudCallback(cloud);
       });
+  RCLCPP_INFO(node_->get_logger(), "GridMap subscribed to PointCloud2: %s",
+              cloud_sub_->get_topic_name());
 #ifdef PLAN_ENV_HAS_BIMAX_MSGS
   if (height_map_enable_) {
     height_map_pub_ = node_->create_publisher<bimax_msgs::msg::HeightMap>(
@@ -230,7 +253,9 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node) {
 
 bool GridMap::pointCloudCallback(
     const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud) {
-  if (!cloud) return false;
+  if (!cloud) {
+    return false;
+  }
 
   {
     std::lock_guard<std::mutex> lock(pending_cloud_mutex_);
@@ -271,7 +296,11 @@ bool GridMap::processQueuedCloud(
       !occupancy_updates_enabled_ || !processPointCloudFrame(cloud)) {
     return false;
   }
-  // Publish only complete stationary positions, within the task transaction.
+  // Publish once the minimum prefix is fused. The upper quota caps additional
+  // fusion while the robot remains at this position.
+  if (!hasMinimumStationaryFrames()) {
+    return false;
+  }
   publishEsdfSnapshot();
   publishHeightMap();
   return true;
@@ -279,7 +308,9 @@ bool GridMap::processQueuedCloud(
 
 bool GridMap::processPointCloudFrame(
     const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud) {
-  if (!task_region_.valid || !occupancy_updates_enabled_) return false;
+  if (!task_region_.valid || !occupancy_updates_enabled_) {
+    return false;
+  }
   PreparedCloud prepared;
   if (!processPointCloud(cloud, &prepared)) {
     return false;
@@ -289,12 +320,27 @@ bool GridMap::processPointCloudFrame(
   if (!updateMotionState(prepared, &mode)) {
     // A cloud can still be transformed while the robot is moving, but it is
     // intentionally not committed to cloud_points_ or to any map layer.
+    if (node_) {
+      const auto status = mappingStatus();
+      RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
+                           "GridMap did not fuse cloud: motion gate state=%u "
+                           "stationary_frames=%u/%u",
+                           static_cast<unsigned int>(status.motion_state),
+                           status.stationary_frame_count,
+                           status.stationary_frames_min);
+    }
     return false;
   }
 
   Eigen::Isometry3f pose = station_pose_correction_ * prepared.prior_pose;
   if (mode == FusionMode::kDifferentPosition &&
       !registerDifferentPosition(prepared, &pose)) {
+    if (node_) {
+      RCLCPP_WARN_THROTTLE(
+          node_->get_logger(), *node_->get_clock(), 5000,
+          "GridMap did not fuse cloud: cross-position registration rejected "
+          "the frame");
+    }
     return false;
   }
 
@@ -303,10 +349,12 @@ bool GridMap::processPointCloudFrame(
   const TaskRegion region = taskRegion();
   for (const auto &point : prepared.sensor_points) {
     const Eigen::Vector3f point_map = pose * point;
-    const bool clearing_ground = cloud_low_z_clear_rays_ && point_map.z() < cloud_min_map_z_;
+    const bool clearing_ground =
+        cloud_low_z_clear_rays_ && point_map.z() < cloud_min_map_z_;
     if (region.valid &&
         !region.contains(point_map.x(), point_map.y(),
-                         clearing_ground ? std::max(point_map.z(), region.z_min) : point_map.z())) {
+                         clearing_ground ? std::max(point_map.z(), region.z_min)
+                                         : point_map.z())) {
       continue;
     }
     if (point_map.z() < cloud_min_map_z_ && !cloud_low_z_clear_rays_) {
@@ -315,6 +363,12 @@ bool GridMap::processPointCloudFrame(
     transformed_points.push_back(point_map);
   }
   if (transformed_points.empty()) {
+    if (node_) {
+      RCLCPP_WARN_THROTTLE(
+          node_->get_logger(), *node_->get_clock(), 5000,
+          "GridMap did not fuse cloud: no filtered points remain inside the "
+          "active task ROI and map height range");
+    }
     return false;
   }
   cloud_points_ = std::move(transformed_points);
@@ -322,7 +376,14 @@ bool GridMap::processPointCloudFrame(
   const bool fused = mode == FusionMode::kSamePosition
                          ? fuseSamePositionFrame()
                          : fuseDifferentPositionFrame();
-  if (!fused) return false;
+  if (!fused) {
+    if (node_) {
+      RCLCPP_WARN_THROTTLE(
+          node_->get_logger(), *node_->get_clock(), 5000,
+          "GridMap did not fuse cloud: ray/occupancy integration failed");
+    }
+    return false;
+  }
   registration_target_points_.insert(registration_target_points_.end(),
                                      cloud_points_.begin(),
                                      cloud_points_.end());
@@ -337,14 +398,31 @@ bool GridMap::processPointCloudFrame(
 
   // Apply the accepted registration consistently to every frame at this stop.
   station_pose_correction_ = pose * prepared.prior_pose.inverse();
-  if (!recordSuccessfulFusion()) return false;
+  if (!recordSuccessfulFusion()) {
+    if (node_) {
+      RCLCPP_WARN_THROTTLE(
+          node_->get_logger(), *node_->get_clock(), 5000,
+          "GridMap did not fuse cloud: fusion quota update failed");
+    }
+    return false;
+  }
 
-  // The distance field is intentionally recomputed only after the current
-  // stationary position has accumulated its successful fusion quota.
-  if (!esdf_volume_.compute(occupancy_voxels_, occupancy_model_)) return false;
+  // Recompute ESDF after every accepted stationary frame so a minimum-prefix
+  // HeightMap/ESDF snapshot is available before the upper movement quota.
+  if (!esdf_volume_.compute(occupancy_voxels_, occupancy_model_)) {
+    if (node_) {
+      RCLCPP_ERROR_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
+                            "GridMap failed to compute ESDF after fusion");
+    }
+    return false;
+  }
   {
     std::lock_guard<std::mutex> lock(motion_mutex_);
-    motion_state_ = MotionState::kReadyToMove;
+    if (stationary_frame_count_ < stationary_frames_required_) {
+      motion_state_ = MotionState::kStationaryCollecting;
+    } else {
+      motion_state_ = MotionState::kReadyToMove;
+    }
   }
   return true;
 }
@@ -373,6 +451,11 @@ bool GridMap::processPointCloud(
   }
   prepared->sensor_points.clear();
   if (!cloud || cloud->data.empty() || cloud->header.frame_id.empty()) {
+    if (node_) {
+      RCLCPP_WARN_THROTTLE(
+          node_->get_logger(), *node_->get_clock(), 5000,
+          "GridMap rejected cloud: null/empty data or missing frame_id");
+    }
     return false;
   }
 
@@ -392,6 +475,10 @@ bool GridMap::processPointCloud(
   finite_cloud->height = 1;
   finite_cloud->is_dense = true;
   if (finite_cloud->empty()) {
+    RCLCPP_WARN_THROTTLE(
+        node_->get_logger(), *node_->get_clock(), 5000,
+        "GridMap rejected cloud: all %u input points are non-finite",
+        static_cast<unsigned int>(input_cloud.points.size()));
     return false;
   }
 
@@ -402,6 +489,12 @@ bool GridMap::processPointCloud(
                            cloud_leaf_size_);
   voxel_filter.filter(filtered_cloud);
   if (filtered_cloud.empty()) {
+    RCLCPP_WARN_THROTTLE(
+        node_->get_logger(), *node_->get_clock(), 5000,
+        "GridMap rejected cloud: voxel filter removed all %u finite points "
+        "(leaf=%.4fm)",
+        static_cast<unsigned int>(finite_cloud->points.size()),
+        cloud_leaf_size_);
     return false;
   }
 
@@ -416,7 +509,11 @@ bool GridMap::processPointCloud(
     transform = tf_buffer_->lookupTransform(
         map_frame_, source_frame, cloud->header.stamp,
         rclcpp::Duration::from_seconds(0.05));
-  } catch (const tf2::TransformException &) {
+  } catch (const tf2::TransformException &error) {
+    RCLCPP_WARN_THROTTLE(
+        node_->get_logger(), *node_->get_clock(), 5000,
+        "GridMap rejected cloud: TF lookup %s <- %s failed: %s",
+        map_frame_.c_str(), source_frame.c_str(), error.what());
     return false;
   }
 
@@ -444,6 +541,13 @@ bool GridMap::processPointCloud(
     sensor_points.push_back(point_camera);
   }
   if (sensor_points.empty()) {
+    RCLCPP_WARN_THROTTLE(
+        node_->get_logger(), *node_->get_clock(), 5000,
+        "GridMap rejected cloud: no points remain after sensor range filter "
+        "(input=%u, min_range=%.3fm, range=[%.2f, %.2f, %.2f]m)",
+        static_cast<unsigned int>(filtered_cloud.points.size()),
+        cloud_min_range_, local_update_range_.x(), local_update_range_.y(),
+        local_update_range_.z());
     return false;
   }
 
@@ -473,9 +577,14 @@ bool GridMap::processPointCloud(
                              static_cast<float>(motion_rotation.y),
                              static_cast<float>(motion_rotation.z))
               .normalized();
-    } catch (const tf2::TransformException &) {
+    } catch (const tf2::TransformException &error) {
       // Keep the cloud-frame pose fallback. It preserves operation for
       // systems that only publish a camera TF tree.
+      RCLCPP_WARN_THROTTLE(
+          node_->get_logger(), *node_->get_clock(), 5000,
+          "GridMap motion TF lookup %s <- %s failed; using cloud pose "
+          "fallback: %s",
+          map_frame_.c_str(), motion_frame_.c_str(), error.what());
     }
   }
   return true;
@@ -515,14 +624,16 @@ bool GridMap::updateMapsFromRays() {
   bool integrated_voxel = false;
   for (const auto &point : cloud_points_) {
     const bool low_z = point.z() < cloud_min_map_z_;
-    if (low_z && !cloud_low_z_clear_rays_) continue;
+    if (low_z && !cloud_low_z_clear_rays_) {
+      continue;
+    }
     const bool endpoint_in_grid = ray_casting::pointInGrid(
         grid_geometry_.origin, grid_geometry_.resolution, grid_size, point);
     ray_casting::traverseRay(
         grid_geometry_.origin, grid_geometry_.resolution, grid_size, ray_origin,
         point,
-        [this, &ray_origin, &point, &integrated_voxel,
-         endpoint_in_grid, low_z](const Eigen::Vector3i &voxel_id, bool hit) {
+        [this, &ray_origin, &point, &integrated_voxel, endpoint_in_grid,
+         low_z](const Eigen::Vector3i &voxel_id, bool hit) {
           const int address = toAddress(voxel_id);
           if (address < 0 ||
               static_cast<size_t>(address) >= occupancy_voxels_.size()) {

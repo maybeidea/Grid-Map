@@ -46,8 +46,11 @@ void zBounds(const GridMap &map, const double z_max, int *z0, int *z1) {
 bool GridMap::buildHeightMapMsg(bimax_msgs::msg::HeightMap &msg,
                                 const Eigen::Isometry3d &T_map_from_height) {
   std::lock_guard<std::recursive_mutex> state_lock(task_region_mutex_);
-  if (!isMappingReadyForPlanning() || grid_geometry_.size_x <= 0 ||
-      grid_geometry_.size_y <= 0 || occupancy_voxels_.empty()) {
+  // HeightMap is useful as soon as a short stationary prefix has been fused.
+  // The upper quota remains a cap on additional fusion at this position.
+  if (!task_region_.valid || !hasMinimumStationaryFrames() ||
+      grid_geometry_.size_x <= 0 || grid_geometry_.size_y <= 0 ||
+      occupancy_voxels_.empty()) {
     return false;
   }
 

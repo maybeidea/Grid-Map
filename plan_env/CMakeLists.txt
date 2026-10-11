@@ -33,12 +33,19 @@ endif()
 
 find_package(ament_cmake REQUIRED)
 find_package(ament_cmake_target_dependencies REQUIRED)
+find_package(builtin_interfaces REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(nlohmann_json REQUIRED)
 find_package(bimax_msgs QUIET)
 find_package(pcl_conversions REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rosbag2_cpp REQUIRED)
+find_package(rosbag2_storage REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(tf2 REQUIRED)
+find_package(tf2_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 
 # PCL's VTK dependencies require the MPI C target.
@@ -101,6 +108,48 @@ if(bimax_msgs_FOUND)
   ament_target_dependencies(plan_env PUBLIC bimax_msgs)
 endif()
 
+add_executable(grid_map_standalone_test src/grid_map_standalone_test.cpp)
+target_compile_definitions(grid_map_standalone_test PRIVATE
+    PLAN_ENV_VIS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/vis"
+    PLAN_ENV_BAG_DIR="${CMAKE_CURRENT_SOURCE_DIR}/bag"
+)
+target_link_libraries(grid_map_standalone_test
+    plan_env
+    nlohmann_json::nlohmann_json
+    ${PCL_LIBRARIES}
+)
+if(COMMAND ament_target_dependencies)
+  ament_target_dependencies(grid_map_standalone_test
+      builtin_interfaces
+      geometry_msgs
+      nav_msgs
+      rclcpp
+      rosbag2_cpp
+      rosbag2_storage
+      sensor_msgs
+      std_msgs
+      pcl_conversions
+      tf2
+      tf2_msgs
+      tf2_ros
+  )
+else()
+  target_link_libraries(grid_map_standalone_test
+      ${builtin_interfaces_TARGETS}
+      ${geometry_msgs_TARGETS}
+      ${nav_msgs_TARGETS}
+      ${rclcpp_TARGETS}
+      ${rosbag2_cpp_TARGETS}
+      ${rosbag2_storage_TARGETS}
+      ${sensor_msgs_TARGETS}
+      ${std_msgs_TARGETS}
+      ${pcl_conversions_TARGETS}
+      ${tf2_TARGETS}
+      ${tf2_msgs_TARGETS}
+      ${tf2_ros_TARGETS}
+  )
+endif()
+
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(grid_map_query_test test/grid_map_query_test.cpp)
@@ -132,6 +181,7 @@ install(TARGETS plan_env
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
 )
+install(TARGETS grid_map_standalone_test DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
 ament_export_targets(export_plan_env HAS_LIBRARY_TARGET)
 ament_export_include_directories(include)

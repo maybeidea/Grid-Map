@@ -86,9 +86,8 @@ bool GridMap::buildEsdfFreezingVolumeCloud(
       }
     }
   }
-  if (cloud.empty()) {
-    return false;
-  }
+  // A valid snapshot with no occupied voxels still clears previous displays.
+  // false is reserved for a missing snapshot.
   cloud.width = static_cast<uint32_t>(cloud.size());
   cloud.height = 1;
   cloud.is_dense = true;
@@ -120,7 +119,7 @@ bool GridMap::saveEsdfSnapshot(const std::string &output_dir,
     saved = pcl::io::savePCDFileBinary(base + "_slice.pcd", pcl_cloud) == 0 ||
             saved;
   }
-  if (save_local3d && buildEsdfFreezingVolumeCloud(cloud)) {
+  if (save_local3d && buildEsdfFreezingVolumeCloud(cloud) && cloud.width > 0) {
     pcl::PointCloud<pcl::PointXYZI> pcl_cloud;
     pcl::fromROSMsg(cloud, pcl_cloud);
     saved = pcl::io::savePCDFileBinary(base + "_local3d.pcd", pcl_cloud) == 0 ||

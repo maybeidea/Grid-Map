@@ -6,18 +6,23 @@ namespace plan_env {
 
 bool GridMap::configureMotion(const float translation_threshold,
                               const float rotation_threshold_rad,
-                              const uint32_t stationary_frames) {
+                              const uint32_t stationary_frames,
+                              const uint32_t stationary_frames_min) {
   if (!std::isfinite(translation_threshold) || translation_threshold < 0.0f ||
       !std::isfinite(rotation_threshold_rad) || rotation_threshold_rad < 0.0f ||
-      stationary_frames == 0) {
+      stationary_frames == 0 || stationary_frames_min > stationary_frames) {
     return false;
   }
+  const uint32_t minimum = stationary_frames_min == 0
+                               ? stationary_frames
+                               : stationary_frames_min;
   std::lock_guard<std::recursive_mutex> state_lock(task_region_mutex_);
   {
     std::lock_guard<std::mutex> lock(motion_mutex_);
     motion_translation_threshold_ = translation_threshold;
     motion_rotation_threshold_rad_ = rotation_threshold_rad;
     stationary_frames_required_ = stationary_frames;
+    stationary_frames_min_ = minimum;
   }
   resetMotionState();
   return true;
@@ -30,18 +35,21 @@ MappingStatus GridMap::mappingStatus() const {
   status.motion_state = motion_state_;
   status.last_fusion_mode = last_fusion_mode_;
   status.stationary_frame_count = stationary_frame_count_;
+  status.stationary_frames_min = stationary_frames_min_;
   status.stationary_frames_required = stationary_frames_required_;
   status.position_index = position_index_;
   status.same_position_fused_frames = same_position_fused_frames_;
   status.different_position_fused_frames = different_position_fused_frames_;
-  status.ready_to_move = motion_state_ == MotionState::kReadyToMove;
+  // A minimum stable prefix is sufficient for planning and for accepting a
+  // navigation move. The upper quota only caps further fusion at this stop.
+  status.ready_to_move = stationary_frame_count_ >= stationary_frames_min_;
   return status;
 }
 
 bool GridMap::readyToMove() const {
   std::lock_guard<std::recursive_mutex> state_lock(task_region_mutex_);
   std::lock_guard<std::mutex> lock(motion_mutex_);
-  return motion_state_ == MotionState::kReadyToMove;
+  return stationary_frame_count_ >= stationary_frames_min_;
 }
 
 void GridMap::resetMotionState() {
@@ -143,11 +151,16 @@ bool GridMap::recordSuccessfulFusion() {
   if (stationary_frame_count_ >= stationary_frames_required_) {
     stationary_frame_count_ = stationary_frames_required_;
     // processPointCloudFrame marks ready only after ESDF computation succeeds;
-    // mappingLoop publishes that snapshot in the same task transaction.
+    // mappingLoop publishes snapshots from the minimum quota onward.
     return true;
   }
   motion_state_ = MotionState::kStationaryCollecting;
-  return false;
+  return true;
+}
+
+bool GridMap::hasMinimumStationaryFrames() const {
+  std::lock_guard<std::mutex> lock(motion_mutex_);
+  return stationary_frame_count_ >= stationary_frames_min_;
 }
 
 }  // namespace plan_env
