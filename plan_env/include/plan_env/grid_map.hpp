@@ -51,7 +51,7 @@ enum class MotionState {
   kReadyToMove,
 };
 
-/** The fusion policy is deliberately selected before the map update. */
+/** The last map layer that was committed to the global map. */
 enum class FusionMode {
   kSamePosition,
   kDifferentPosition,
@@ -60,12 +60,17 @@ enum class FusionMode {
 struct MappingStatus {
   MotionState motion_state = MotionState::kWaitingForPose;
   FusionMode last_fusion_mode = FusionMode::kSamePosition;
+  // Number of successfully fused frames in the current local map.
   uint32_t stationary_frame_count = 0;
+  // Retained for compatibility with the height-map configuration.
   uint32_t stationary_frames_min = 5;
+  // Local-map commit quota.
   uint32_t stationary_frames_required = 30;
   uint64_t position_index = 0;
   uint64_t same_position_fused_frames = 0;
   uint64_t different_position_fused_frames = 0;
+  // True only after the current local map has been recalibrated and committed
+  // to the global map.
   bool ready_to_move = false;
 };
 
@@ -223,15 +228,25 @@ private:
   bool processPointCloud(
       const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud,
       PreparedCloud *prepared);
-  bool registerDifferentPosition(const PreparedCloud &prepared,
-                                 Eigen::Isometry3f *pose);
   bool updateMotionState(const PreparedCloud &prepared, FusionMode *mode);
   void resetMotionState();
   // Separate policy entry points keep temporal and cross-position fusion
   // policies independent of the occupancy integrator.
   bool fuseSamePositionFrame();
   bool fuseDifferentPositionFrame();
-  bool updateMapsFromRays();
+  struct RayObservation {
+    Eigen::Vector3f origin = Eigen::Vector3f::Zero();
+    Eigen::Vector3f endpoint = Eigen::Vector3f::Zero();
+    bool low_z = false;
+  };
+  bool updateMapsFromRays(std::vector<OccupancyVoxel> *occupancy,
+                          tsdf::TsdfVolume *tsdf,
+                          std::vector<RayObservation> *observations);
+  bool integrateRayObservations(
+      const std::vector<RayObservation> &observations,
+      std::vector<OccupancyVoxel> *occupancy, tsdf::TsdfVolume *tsdf);
+  void clearLocalMap();
+  bool commitLocalMap();
   bool recordSuccessfulFusion();
   bool hasMinimumStationaryFrames() const;
   void publishEsdfSnapshot();
@@ -242,11 +257,15 @@ private:
   GridGeometry grid_geometry_;
 
   tsdf::TsdfVolume tsdf_volume_;
+  tsdf::TsdfVolume local_tsdf_volume_;
   bool tsdf_enabled_ = false;
   float tsdf_truncation_distance_ = 0.05f;
   occupancy::LogOddsModel occupancy_model_;
   esdf::EsdfConfig esdf_config_;
   std::vector<OccupancyVoxel> occupancy_voxels_;
+  // Same-position frames are accumulated here until the station quota is
+  // reached. They are invisible to queries until commitLocalMap() succeeds.
+  std::vector<OccupancyVoxel> local_occupancy_voxels_;
   esdf::EsdfVolume esdf_volume_;
   registration::PointCloudRegistrationBackend registration_backend_;
   std::vector<Eigen::Vector3f> registration_target_points_;
@@ -276,6 +295,8 @@ private:
 
   // Points retained by processPointCloud are expressed in map_frame_.
   std::vector<Eigen::Vector3f> cloud_points_;
+  std::vector<RayObservation> local_ray_observations_;
+  std::vector<Eigen::Vector3f> local_surface_points_;
   Eigen::Isometry3f station_pose_correction_ = Eigen::Isometry3f::Identity();
   Eigen::Vector3f camera_position_ = Eigen::Vector3f::Zero();
   std::string map_frame_ = "map";
@@ -305,6 +326,10 @@ private:
   std::shared_ptr<const EsdfSnapshot> frozen_esdf_snapshot_;
   bool esdf_freezing_query_active_ = false;
   bool occupancy_updates_enabled_ = true;
+  bool global_map_initialized_ = false;
+  bool global_map_ready_for_current_position_ = false;
+  bool local_map_cross_position_ = false;
+  bool global_map_dirty_ = false;
 
   mutable std::mutex motion_mutex_;
   MotionState motion_state_ = MotionState::kWaitingForPose;

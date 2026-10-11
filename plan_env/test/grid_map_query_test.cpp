@@ -178,7 +178,7 @@ TEST_F(GridMapQueryTest, translationAndRotationResumeAtThreeSuccessiveStops) {
   map_->captureEsdfFreezing();
   EXPECT_FALSE(map_->hasEsdfFreezing());
   EXPECT_FALSE(frame(0.5f));
-  EXPECT_EQ(FusionMode::kDifferentPosition, map_->mappingStatus().last_fusion_mode);
+  EXPECT_EQ(FusionMode::kSamePosition, map_->mappingStatus().last_fusion_mode);
   ASSERT_TRUE(frame(0.5f));
   EXPECT_TRUE(map_->isMappingReadyForPlanning());
   EXPECT_EQ(2u, map_->mappingStatus().position_index);
@@ -191,27 +191,31 @@ TEST_F(GridMapQueryTest, translationAndRotationResumeAtThreeSuccessiveStops) {
   EXPECT_TRUE(map_->readyToMove());
 }
 
-TEST_F(GridMapQueryTest, minimumStationaryPrefixPublishesBeforeUpperQuota) {
+TEST_F(GridMapQueryTest, localMapCommitsOnlyAfterStationaryQuota) {
   ASSERT_TRUE(map_->configureMotion(0.03f, 0.02f, 5, 2));
   EXPECT_FALSE(frame());
   EXPECT_FALSE(frame());
   EXPECT_EQ(1u, map_->mappingStatus().stationary_frame_count);
   EXPECT_FALSE(map_->isMappingReadyForPlanning());
 
-  ASSERT_TRUE(frame());
+  EXPECT_FALSE(frame());
   EXPECT_EQ(2u, map_->mappingStatus().stationary_frame_count);
-  EXPECT_TRUE(map_->isMappingReadyForPlanning());
-  const auto early_version = map_->snapshot()->version;
+  EXPECT_FALSE(map_->isMappingReadyForPlanning());
+  EXPECT_EQ(-1, map_->getOccupancy(Eigen::Vector3d(0.625, 0.125, 0.375)));
+  const auto local_version = map_->snapshot()->version;
 
-  ASSERT_TRUE(frame());
-  EXPECT_GT(map_->snapshot()->version, early_version);
+  EXPECT_FALSE(frame());
   EXPECT_EQ(3u, map_->mappingStatus().stationary_frame_count);
-  EXPECT_TRUE(map_->readyToMove());
+  EXPECT_EQ(local_version, map_->snapshot()->version);
+  EXPECT_FALSE(map_->readyToMove());
 
-  ASSERT_TRUE(frame());
+  EXPECT_FALSE(frame());
   ASSERT_TRUE(frame());
   EXPECT_EQ(5u, map_->mappingStatus().stationary_frame_count);
   EXPECT_EQ(MotionState::kReadyToMove, map_->mappingStatus().motion_state);
+  EXPECT_TRUE(map_->isMappingReadyForPlanning());
+  EXPECT_TRUE(map_->readyToMove());
+  EXPECT_EQ(1, map_->getOccupancy(Eigen::Vector3d(0.625, 0.125, 0.375)));
 }
 
 TEST_F(GridMapQueryTest, cumulativeDriftInterruptsQuotaAndResetsNewStop) {

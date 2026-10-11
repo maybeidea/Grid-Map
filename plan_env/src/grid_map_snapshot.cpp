@@ -91,7 +91,25 @@ bool GridMap::buildEsdfFreezingVolumeCloud(
   cloud.width = static_cast<uint32_t>(cloud.size());
   cloud.height = 1;
   cloud.is_dense = true;
-  pcl::toROSMsg(cloud, cloud_msg);
+  if (cloud.empty()) {
+    cloud_msg = sensor_msgs::msg::PointCloud2();
+    cloud_msg.height = 1;
+    cloud_msg.width = 0;
+    cloud_msg.is_bigendian = false;
+    cloud_msg.is_dense = true;
+    cloud_msg.point_step = sizeof(float) * 4;
+    cloud_msg.row_step = 0;
+    cloud_msg.fields.resize(4);
+    const char *names[] = {"x", "y", "z", "intensity"};
+    for (std::size_t i = 0; i < 4; ++i) {
+      cloud_msg.fields[i].name = names[i];
+      cloud_msg.fields[i].offset = static_cast<std::uint32_t>(i * sizeof(float));
+      cloud_msg.fields[i].datatype = sensor_msgs::msg::PointField::FLOAT32;
+      cloud_msg.fields[i].count = 1;
+    }
+  } else {
+    pcl::toROSMsg(cloud, cloud_msg);
+  }
   cloud_msg.header.frame_id = map_frame_;
   if (node_) {
     cloud_msg.header.stamp = node_->now();

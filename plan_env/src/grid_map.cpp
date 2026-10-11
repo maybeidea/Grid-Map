@@ -206,10 +206,17 @@ bool GridMap::startTaskMapping(const std::vector<Eigen::Vector2d> &polygon_xy,
       stopTaskMapping();
       return false;
     }
+    if (!local_tsdf_volume_.configure(grid_geometry_,
+                                      tsdf_truncation_distance_)) {
+      stopTaskMapping();
+      return false;
+    }
   } else {
     tsdf_volume_.clear();
+    local_tsdf_volume_.clear();
   }
   occupancy_voxels_.assign(voxel_count, OccupancyVoxel{});
+  local_occupancy_voxels_.assign(voxel_count, OccupancyVoxel{});
   if (!esdf_volume_.configure(grid_geometry_, esdf_config_)) {
     stopTaskMapping();
     return false;
@@ -281,10 +288,18 @@ void GridMap::invalidateTaskSnapshots() {
 
 void GridMap::clearMappingBuffers() {
   tsdf_volume_.clear();
+  local_tsdf_volume_.clear();
   esdf_volume_.clear();
   occupancy_voxels_.clear();
+  local_occupancy_voxels_.clear();
   registration_target_points_.clear();
+  local_ray_observations_.clear();
+  local_surface_points_.clear();
   cloud_points_.clear();
+  global_map_initialized_ = false;
+  global_map_ready_for_current_position_ = false;
+  local_map_cross_position_ = false;
+  global_map_dirty_ = false;
 }
 
 }  // namespace plan_env

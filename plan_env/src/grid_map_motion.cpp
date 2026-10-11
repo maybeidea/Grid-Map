@@ -40,34 +40,39 @@ MappingStatus GridMap::mappingStatus() const {
   status.position_index = position_index_;
   status.same_position_fused_frames = same_position_fused_frames_;
   status.different_position_fused_frames = different_position_fused_frames_;
-  // A minimum stable prefix is sufficient for planning and for accepting a
-  // navigation move. The upper quota only caps further fusion at this stop.
-  status.ready_to_move = stationary_frame_count_ >= stationary_frames_min_;
+  // Planning can use only a global map that has been committed for this
+  // station. Local evidence is deliberately hidden until that commit.
+  status.ready_to_move = global_map_ready_for_current_position_;
   return status;
 }
 
 bool GridMap::readyToMove() const {
   std::lock_guard<std::recursive_mutex> state_lock(task_region_mutex_);
   std::lock_guard<std::mutex> lock(motion_mutex_);
-  return stationary_frame_count_ >= stationary_frames_min_;
+  return global_map_ready_for_current_position_;
 }
 
 void GridMap::resetMotionState() {
-  std::lock_guard<std::mutex> lock(motion_mutex_);
-  station_pose_correction_.setIdentity();
-  motion_state_ = MotionState::kWaitingForPose;
-  last_fusion_mode_ = FusionMode::kSamePosition;
-  last_motion_position_.setZero();
-  last_motion_orientation_ = Eigen::Quaternionf::Identity();
-  stationary_anchor_position_.setZero();
-  stationary_anchor_orientation_ = Eigen::Quaternionf::Identity();
-  has_last_motion_pose_ = false;
-  has_stationary_anchor_ = false;
-  awaiting_new_position_ = false;
-  stationary_frame_count_ = 0;
-  position_index_ = 0;
-  same_position_fused_frames_ = 0;
-  different_position_fused_frames_ = 0;
+  {
+    std::lock_guard<std::mutex> lock(motion_mutex_);
+    station_pose_correction_.setIdentity();
+    motion_state_ = MotionState::kWaitingForPose;
+    last_fusion_mode_ = FusionMode::kSamePosition;
+    last_motion_position_.setZero();
+    last_motion_orientation_ = Eigen::Quaternionf::Identity();
+    stationary_anchor_position_.setZero();
+    stationary_anchor_orientation_ = Eigen::Quaternionf::Identity();
+    has_last_motion_pose_ = false;
+    has_stationary_anchor_ = false;
+    awaiting_new_position_ = false;
+    local_map_cross_position_ = false;
+    stationary_frame_count_ = 0;
+    position_index_ = 0;
+    same_position_fused_frames_ = 0;
+    different_position_fused_frames_ = 0;
+  }
+  global_map_ready_for_current_position_ = false;
+  clearLocalMap();
 }
 
 bool GridMap::updateMotionState(const PreparedCloud &prepared,
@@ -112,6 +117,8 @@ bool GridMap::updateMotionState(const PreparedCloud &prepared,
     motion_state_ = MotionState::kMoving;
     stationary_frame_count_ = 0;
     awaiting_new_position_ = true;
+    global_map_ready_for_current_position_ = false;
+    clearLocalMap();
     // The old anchor has served its purpose (detecting cumulative drift).
     // Subsequent poses must settle relative to each other at the new stop.
     has_stationary_anchor_ = false;
@@ -131,12 +138,14 @@ bool GridMap::updateMotionState(const PreparedCloud &prepared,
     has_stationary_anchor_ = true;
     awaiting_new_position_ = false;
     stationary_frame_count_ = 0;
+    local_map_cross_position_ = global_map_initialized_;
+    global_map_ready_for_current_position_ = false;
     ++position_index_;
   }
-  // Registration must succeed before we leave cross-position mode. Failed
-  // registration / empty ROI / failed integration must not bypass this gate.
-  *mode = position_index_ > 1 && stationary_frame_count_ == 0
-              ? FusionMode::kDifferentPosition : FusionMode::kSamePosition;
+  // Every accepted frame first enters the current-position local map. The
+  // different-position mode is recorded only after that local map is
+  // recalibrated and committed to the global map.
+  *mode = FusionMode::kSamePosition;
 
   // The quota is advanced only after the map integrator confirms that this
   // cloud was actually fused. This function only admits the candidate frame.
@@ -150,8 +159,8 @@ bool GridMap::recordSuccessfulFusion() {
   ++stationary_frame_count_;
   if (stationary_frame_count_ >= stationary_frames_required_) {
     stationary_frame_count_ = stationary_frames_required_;
-    // processPointCloudFrame marks ready only after ESDF computation succeeds;
-    // mappingLoop publishes snapshots from the minimum quota onward.
+    // The local quota is complete. processPointCloudFrame still has to
+    // recalibrate and commit the local map before the station is ready.
     return true;
   }
   motion_state_ = MotionState::kStationaryCollecting;

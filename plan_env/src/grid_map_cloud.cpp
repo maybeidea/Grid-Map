@@ -296,14 +296,18 @@ bool GridMap::processQueuedCloud(
       !occupancy_updates_enabled_ || !processPointCloudFrame(cloud)) {
     return false;
   }
-  // Publish once the minimum prefix is fused. The upper quota caps additional
-  // fusion while the robot remains at this position.
-  if (!hasMinimumStationaryFrames()) {
-    return false;
+  // Local frames are accepted without publishing them. A snapshot is
+  // published only after the local station has been recalibrated and merged
+  // into the global map.
+  if (global_map_dirty_) {
+    global_map_dirty_ = false;
+    publishEsdfSnapshot();
+    publishHeightMap();
+    return true;
   }
-  publishEsdfSnapshot();
-  publishHeightMap();
-  return true;
+  // A local-only update is intentionally not reported as a committed map
+  // update to callers that use this return value as a planning-ready signal.
+  return false;
 }
 
 bool GridMap::processPointCloudFrame(
@@ -332,17 +336,10 @@ bool GridMap::processPointCloudFrame(
     return false;
   }
 
+  // The station is accumulated in its odometry/TF pose. Cross-position
+  // registration is intentionally delayed until the complete local map is
+  // available, immediately before the global commit.
   Eigen::Isometry3f pose = station_pose_correction_ * prepared.prior_pose;
-  if (mode == FusionMode::kDifferentPosition &&
-      !registerDifferentPosition(prepared, &pose)) {
-    if (node_) {
-      RCLCPP_WARN_THROTTLE(
-          node_->get_logger(), *node_->get_clock(), 5000,
-          "GridMap did not fuse cloud: cross-position registration rejected "
-          "the frame");
-    }
-    return false;
-  }
 
   std::vector<Eigen::Vector3f> transformed_points;
   transformed_points.reserve(prepared.sensor_points.size());
@@ -373,31 +370,15 @@ bool GridMap::processPointCloudFrame(
   }
   cloud_points_ = std::move(transformed_points);
   camera_position_ = pose.translation();
-  const bool fused = mode == FusionMode::kSamePosition
-                         ? fuseSamePositionFrame()
-                         : fuseDifferentPositionFrame();
-  if (!fused) {
+  if (!fuseSamePositionFrame()) {
     if (node_) {
       RCLCPP_WARN_THROTTLE(
           node_->get_logger(), *node_->get_clock(), 5000,
-          "GridMap did not fuse cloud: ray/occupancy integration failed");
+          "GridMap did not fuse cloud into the local map: ray integration "
+          "failed");
     }
     return false;
   }
-  registration_target_points_.insert(registration_target_points_.end(),
-                                     cloud_points_.begin(),
-                                     cloud_points_.end());
-  constexpr std::size_t kMaxRegistrationTargetPoints = 100000;
-  if (registration_target_points_.size() > kMaxRegistrationTargetPoints) {
-    const std::size_t excess =
-        registration_target_points_.size() - kMaxRegistrationTargetPoints;
-    registration_target_points_.erase(registration_target_points_.begin(),
-                                      registration_target_points_.begin() +
-                                          static_cast<std::ptrdiff_t>(excess));
-  }
-
-  // Apply the accepted registration consistently to every frame at this stop.
-  station_pose_correction_ = pose * prepared.prior_pose.inverse();
   if (!recordSuccessfulFusion()) {
     if (node_) {
       RCLCPP_WARN_THROTTLE(
@@ -407,39 +388,36 @@ bool GridMap::processPointCloudFrame(
     return false;
   }
 
-  // Recompute ESDF after every accepted stationary frame so a minimum-prefix
-  // HeightMap/ESDF snapshot is available before the upper movement quota.
-  if (!esdf_volume_.compute(occupancy_voxels_, occupancy_model_)) {
-    if (node_) {
-      RCLCPP_ERROR_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
-                            "GridMap failed to compute ESDF after fusion");
+  // The frame quota closes the local map. Only this operation can modify the
+  // global occupancy/TSDF volumes and make a new snapshot visible.
+  const auto status = mappingStatus();
+  if (status.stationary_frame_count >= status.stationary_frames_required) {
+    if (!fuseDifferentPositionFrame()) {
+      if (node_) {
+        RCLCPP_WARN_THROTTLE(
+            node_->get_logger(), *node_->get_clock(), 5000,
+            "GridMap kept local map: cross-position recalibration rejected "
+            "the local map");
+      }
+      return false;
     }
-    return false;
+    if (!esdf_volume_.compute(occupancy_voxels_, occupancy_model_)) {
+      if (node_) {
+        RCLCPP_ERROR_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
+                              "GridMap failed to compute ESDF after global "
+                              "map fusion");
+      }
+      return false;
+    }
   }
   {
     std::lock_guard<std::mutex> lock(motion_mutex_);
-    if (stationary_frame_count_ < stationary_frames_required_) {
-      motion_state_ = MotionState::kStationaryCollecting;
-    } else {
+    if (global_map_ready_for_current_position_) {
       motion_state_ = MotionState::kReadyToMove;
+    } else {
+      motion_state_ = MotionState::kStationaryCollecting;
     }
   }
-  return true;
-}
-
-bool GridMap::registerDifferentPosition(const PreparedCloud &prepared,
-                                        Eigen::Isometry3f *pose) {
-  if (!pose || !registration_backend_.config().enabled ||
-      registration_target_points_.size() <
-          registration_backend_.config().min_target_points) {
-    return true;
-  }
-  const registration::Result result = registration_backend_.align(
-      prepared.sensor_points, registration_target_points_, prepared.prior_pose);
-  if (!result.accepted) {
-    return false;
-  }
-  *pose = result.pose;
   return true;
 }
 
@@ -475,10 +453,12 @@ bool GridMap::processPointCloud(
   finite_cloud->height = 1;
   finite_cloud->is_dense = true;
   if (finite_cloud->empty()) {
-    RCLCPP_WARN_THROTTLE(
-        node_->get_logger(), *node_->get_clock(), 5000,
-        "GridMap rejected cloud: all %u input points are non-finite",
-        static_cast<unsigned int>(input_cloud.points.size()));
+    if (node_) {
+      RCLCPP_WARN_THROTTLE(
+          node_->get_logger(), *node_->get_clock(), 5000,
+          "GridMap rejected cloud: all %u input points are non-finite",
+          static_cast<unsigned int>(input_cloud.points.size()));
+    }
     return false;
   }
 
@@ -489,12 +469,14 @@ bool GridMap::processPointCloud(
                            cloud_leaf_size_);
   voxel_filter.filter(filtered_cloud);
   if (filtered_cloud.empty()) {
-    RCLCPP_WARN_THROTTLE(
-        node_->get_logger(), *node_->get_clock(), 5000,
-        "GridMap rejected cloud: voxel filter removed all %u finite points "
-        "(leaf=%.4fm)",
-        static_cast<unsigned int>(finite_cloud->points.size()),
-        cloud_leaf_size_);
+    if (node_) {
+      RCLCPP_WARN_THROTTLE(
+          node_->get_logger(), *node_->get_clock(), 5000,
+          "GridMap rejected cloud: voxel filter removed all %u finite points "
+          "(leaf=%.4fm)",
+          static_cast<unsigned int>(finite_cloud->points.size()),
+          cloud_leaf_size_);
+    }
     return false;
   }
 
@@ -510,10 +492,12 @@ bool GridMap::processPointCloud(
         map_frame_, source_frame, cloud->header.stamp,
         rclcpp::Duration::from_seconds(0.05));
   } catch (const tf2::TransformException &error) {
-    RCLCPP_WARN_THROTTLE(
-        node_->get_logger(), *node_->get_clock(), 5000,
-        "GridMap rejected cloud: TF lookup %s <- %s failed: %s",
-        map_frame_.c_str(), source_frame.c_str(), error.what());
+    if (node_) {
+      RCLCPP_WARN_THROTTLE(
+          node_->get_logger(), *node_->get_clock(), 5000,
+          "GridMap rejected cloud: TF lookup %s <- %s failed: %s",
+          map_frame_.c_str(), source_frame.c_str(), error.what());
+    }
     return false;
   }
 
@@ -541,13 +525,15 @@ bool GridMap::processPointCloud(
     sensor_points.push_back(point_camera);
   }
   if (sensor_points.empty()) {
-    RCLCPP_WARN_THROTTLE(
-        node_->get_logger(), *node_->get_clock(), 5000,
-        "GridMap rejected cloud: no points remain after sensor range filter "
-        "(input=%u, min_range=%.3fm, range=[%.2f, %.2f, %.2f]m)",
-        static_cast<unsigned int>(filtered_cloud.points.size()),
-        cloud_min_range_, local_update_range_.x(), local_update_range_.y(),
-        local_update_range_.z());
+    if (node_) {
+      RCLCPP_WARN_THROTTLE(
+          node_->get_logger(), *node_->get_clock(), 5000,
+          "GridMap rejected cloud: no points remain after sensor range filter "
+          "(input=%u, min_range=%.3fm, range=[%.2f, %.2f, %.2f]m)",
+          static_cast<unsigned int>(filtered_cloud.points.size()),
+          cloud_min_range_, local_update_range_.x(), local_update_range_.y(),
+          local_update_range_.z());
+    }
     return false;
   }
 
@@ -580,19 +566,23 @@ bool GridMap::processPointCloud(
     } catch (const tf2::TransformException &error) {
       // Keep the cloud-frame pose fallback. It preserves operation for
       // systems that only publish a camera TF tree.
-      RCLCPP_WARN_THROTTLE(
-          node_->get_logger(), *node_->get_clock(), 5000,
-          "GridMap motion TF lookup %s <- %s failed; using cloud pose "
-          "fallback: %s",
-          map_frame_.c_str(), motion_frame_.c_str(), error.what());
+      if (node_) {
+        RCLCPP_WARN_THROTTLE(
+            node_->get_logger(), *node_->get_clock(), 5000,
+            "GridMap motion TF lookup %s <- %s failed; using cloud pose "
+            "fallback: %s",
+            map_frame_.c_str(), motion_frame_.c_str(), error.what());
+      }
     }
   }
   return true;
 }
 
 bool GridMap::fuseSamePositionFrame() {
-  // Temporal fusion at one stationary pose.
-  if (!updateMapsFromRays()) {
+  // Temporal fusion stays in the current-position local map.
+  if (!updateMapsFromRays(&local_occupancy_voxels_,
+                          tsdf_enabled_ ? &local_tsdf_volume_ : nullptr,
+                          &local_ray_observations_)) {
     return false;
   }
   {
@@ -603,50 +593,173 @@ bool GridMap::fuseSamePositionFrame() {
 }
 
 bool GridMap::fuseDifferentPositionFrame() {
-  // Cross-position fusion uses the same integrator after registration.
-  if (!updateMapsFromRays()) {
+  // A complete local map is recalibrated once against the committed global
+  // observations, then replayed into the global voxel volumes.
+  const bool cross_position = local_map_cross_position_;
+  if (!commitLocalMap()) {
     return false;
   }
-  {
+  if (cross_position) {
     std::lock_guard<std::mutex> lock(motion_mutex_);
     ++different_position_fused_frames_;
   }
   return true;
 }
 
-bool GridMap::updateMapsFromRays() {
-  if (grid_geometry_.resolution <= 0.0f || occupancy_voxels_.empty()) {
+bool GridMap::updateMapsFromRays(
+    std::vector<OccupancyVoxel> *occupancy, tsdf::TsdfVolume *tsdf,
+    std::vector<RayObservation> *observations) {
+  if (!occupancy || grid_geometry_.resolution <= 0.0f || occupancy->empty()) {
     return false;
   }
-  const Eigen::Vector3i grid_size(grid_geometry_.size_x, grid_geometry_.size_y,
-                                  grid_geometry_.size_z);
+  std::vector<RayObservation> frame_observations;
+  frame_observations.reserve(cloud_points_.size());
   const Eigen::Vector3f ray_origin = camera_position_;
-  bool integrated_voxel = false;
   for (const auto &point : cloud_points_) {
     const bool low_z = point.z() < cloud_min_map_z_;
     if (low_z && !cloud_low_z_clear_rays_) {
       continue;
     }
+    frame_observations.push_back(RayObservation{ray_origin, point, low_z});
+  }
+  if (frame_observations.empty() ||
+      !integrateRayObservations(frame_observations, occupancy, tsdf)) {
+    return false;
+  }
+  if (observations) {
+    observations->insert(observations->end(), frame_observations.begin(),
+                         frame_observations.end());
+  }
+  for (const auto &observation : frame_observations) {
+    if (!observation.low_z) {
+      local_surface_points_.push_back(observation.endpoint);
+    }
+  }
+  constexpr std::size_t kMaxLocalSurfacePoints = 100000;
+  if (local_surface_points_.size() > kMaxLocalSurfacePoints) {
+    const std::size_t excess =
+        local_surface_points_.size() - kMaxLocalSurfacePoints;
+    local_surface_points_.erase(
+        local_surface_points_.begin(),
+        local_surface_points_.begin() + static_cast<std::ptrdiff_t>(excess));
+  }
+  return true;
+}
+
+bool GridMap::integrateRayObservations(
+    const std::vector<RayObservation> &observations,
+    std::vector<OccupancyVoxel> *occupancy, tsdf::TsdfVolume *tsdf) {
+  if (!occupancy || occupancy->empty() || grid_geometry_.resolution <= 0.0f) {
+    return false;
+  }
+  const Eigen::Vector3i grid_size(grid_geometry_.size_x, grid_geometry_.size_y,
+                                  grid_geometry_.size_z);
+  bool integrated_voxel = false;
+  for (const auto &observation : observations) {
+    const Eigen::Vector3f &ray_origin = observation.origin;
+    const Eigen::Vector3f &point = observation.endpoint;
+    const bool low_z = observation.low_z;
     const bool endpoint_in_grid = ray_casting::pointInGrid(
         grid_geometry_.origin, grid_geometry_.resolution, grid_size, point);
     ray_casting::traverseRay(
         grid_geometry_.origin, grid_geometry_.resolution, grid_size, ray_origin,
         point,
-        [this, &ray_origin, &point, &integrated_voxel, endpoint_in_grid,
-         low_z](const Eigen::Vector3i &voxel_id, bool hit) {
+        [this, occupancy, tsdf, &ray_origin, &point, &integrated_voxel,
+         endpoint_in_grid, low_z](const Eigen::Vector3i &voxel_id, bool hit) {
           const int address = toAddress(voxel_id);
           if (address < 0 ||
-              static_cast<size_t>(address) >= occupancy_voxels_.size()) {
+              static_cast<size_t>(address) >= occupancy->size()) {
             return;
           }
           integrated_voxel = true;
-          occupancy_model_.update(occupancy_voxels_[address], hit && !low_z);
-          if (tsdf_enabled_ && endpoint_in_grid && !low_z) {
-            tsdf_volume_.integrateVoxel(voxel_id, ray_origin, point);
+          occupancy_model_.update((*occupancy)[address], hit && !low_z);
+          if (tsdf && endpoint_in_grid && !low_z) {
+            tsdf->integrateVoxel(voxel_id, ray_origin, point);
           }
         });
   }
   return integrated_voxel;
+}
+
+void GridMap::clearLocalMap() {
+  std::fill(local_occupancy_voxels_.begin(), local_occupancy_voxels_.end(),
+            OccupancyVoxel{});
+  local_ray_observations_.clear();
+  local_surface_points_.clear();
+  if (tsdf_enabled_) {
+    if (grid_geometry_.resolution > 0.0f) {
+      local_tsdf_volume_.configure(grid_geometry_, tsdf_truncation_distance_);
+    }
+  } else {
+    local_tsdf_volume_.clear();
+  }
+}
+
+bool GridMap::commitLocalMap() {
+  if (local_ray_observations_.empty() || local_occupancy_voxels_.empty()) {
+    return false;
+  }
+
+  Eigen::Isometry3f recalibration = Eigen::Isometry3f::Identity();
+  const auto &registration_config = registration_backend_.config();
+  if (local_map_cross_position_ && global_map_initialized_ &&
+      registration_config.enabled &&
+      registration_target_points_.size() >= registration_config.min_target_points &&
+      local_surface_points_.size() >= registration_config.min_target_points) {
+    const registration::Result result = registration_backend_.align(
+        local_surface_points_, registration_target_points_,
+        Eigen::Isometry3f::Identity());
+    if (!result.accepted) {
+      std::lock_guard<std::mutex> lock(motion_mutex_);
+      last_fusion_mode_ = FusionMode::kDifferentPosition;
+      stationary_frame_count_ = 0;
+      motion_state_ = MotionState::kStationaryCollecting;
+      clearLocalMap();
+      return false;
+    }
+    recalibration = result.pose;
+  }
+
+  std::vector<RayObservation> corrected_observations;
+  corrected_observations.reserve(local_ray_observations_.size());
+  for (const auto &observation : local_ray_observations_) {
+    RayObservation corrected = observation;
+    corrected.origin = recalibration * observation.origin;
+    corrected.endpoint = recalibration * observation.endpoint;
+    corrected_observations.push_back(corrected);
+  }
+  if (!integrateRayObservations(corrected_observations, &occupancy_voxels_,
+                                tsdf_enabled_ ? &tsdf_volume_ : nullptr)) {
+    return false;
+  }
+
+  for (const auto &point : local_surface_points_) {
+    registration_target_points_.push_back(recalibration * point);
+  }
+  constexpr std::size_t kMaxRegistrationTargetPoints = 100000;
+  if (registration_target_points_.size() > kMaxRegistrationTargetPoints) {
+    const std::size_t excess =
+        registration_target_points_.size() - kMaxRegistrationTargetPoints;
+    registration_target_points_.erase(
+        registration_target_points_.begin(),
+        registration_target_points_.begin() +
+            static_cast<std::ptrdiff_t>(excess));
+  }
+
+  camera_position_ = recalibration * camera_position_;
+  station_pose_correction_ = recalibration * station_pose_correction_;
+  global_map_initialized_ = true;
+  global_map_ready_for_current_position_ = true;
+  global_map_dirty_ = true;
+  {
+    std::lock_guard<std::mutex> lock(motion_mutex_);
+    last_fusion_mode_ = local_map_cross_position_
+                            ? FusionMode::kDifferentPosition
+                            : FusionMode::kSamePosition;
+  }
+  clearLocalMap();
+  local_map_cross_position_ = false;
+  return true;
 }
 
 }  // namespace plan_env
