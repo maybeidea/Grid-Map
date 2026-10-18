@@ -68,6 +68,7 @@ add_library(plan_env SHARED
     src/registration.cpp
     src/esdf.cpp
     src/tsdf.cpp
+    src/observation_planner.cpp
 )
 
 target_include_directories(plan_env PUBLIC
@@ -182,6 +183,18 @@ install(TARGETS plan_env
   RUNTIME DESTINATION bin
 )
 install(TARGETS grid_map_standalone_test DESTINATION lib/${PROJECT_NAME})
+
+add_executable(observation_planner_node src/observation_planner_node.cpp)
+target_link_libraries(observation_planner_node plan_env nlohmann_json::nlohmann_json usb-1.0)
+if(COMMAND ament_target_dependencies)
+  ament_target_dependencies(observation_planner_node
+      geometry_msgs rclcpp sensor_msgs std_msgs tf2 tf2_ros)
+else()
+  target_link_libraries(observation_planner_node
+      ${geometry_msgs_TARGETS} ${rclcpp_TARGETS} ${sensor_msgs_TARGETS}
+      ${std_msgs_TARGETS} ${tf2_TARGETS} ${tf2_ros_TARGETS})
+endif()
+install(TARGETS observation_planner_node DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
 ament_export_targets(export_plan_env HAS_LIBRARY_TARGET)
 ament_export_include_directories(include)

@@ -40,6 +40,121 @@ double snapshotDistance(const EsdfSnapshot &snapshot,
              : 100000.0;
 }
 
+int snapshotOccupancy(const EsdfSnapshot &snapshot,
+                      const Eigen::Vector3i &id);
+
+bool inGeometry(const GridGeometry &geometry, const Eigen::Vector3d &pos,
+                Eigen::Vector3i *id = nullptr) {
+  const Eigen::Vector3i index = snapshotIndex(geometry, pos);
+  if (id) {
+    *id = index;
+  }
+  return snapshotContains(geometry, index);
+}
+
+bool useHighResolution(const EsdfSnapshot &snapshot,
+                       const Eigen::Vector3d &pos) {
+  return inGeometry(snapshot.geometry, pos);
+}
+
+const GridGeometry &selectedGeometry(const EsdfSnapshot &snapshot,
+                                     const Eigen::Vector3d &pos,
+                                     bool *high) {
+  const bool use_high = useHighResolution(snapshot, pos);
+  if (high) {
+    *high = use_high;
+  }
+  return use_high ? snapshot.geometry : snapshot.expanded_geometry;
+}
+
+double selectedDistance(const EsdfSnapshot &snapshot,
+                        const Eigen::Vector3d &pos) {
+  bool high = false;
+  const GridGeometry &geometry = selectedGeometry(snapshot, pos, &high);
+  const Eigen::Vector3i id = snapshotIndex(geometry, pos);
+  if (high) {
+    return snapshotDistance(snapshot, id);
+  }
+  if (!snapshotContains(geometry, id)) {
+    return 100000.0;
+  }
+  const auto address =
+      static_cast<std::size_t>(snapshotAddress(geometry, id));
+  return address < snapshot.expanded_esdf_voxels.size()
+             ? snapshot.expanded_esdf_voxels[address].distance
+             : 100000.0;
+}
+
+int selectedOccupancy(const EsdfSnapshot &snapshot,
+                      const Eigen::Vector3d &pos) {
+  bool high = false;
+  const GridGeometry &geometry = selectedGeometry(snapshot, pos, &high);
+  const Eigen::Vector3i id = snapshotIndex(geometry, pos);
+  if (high) {
+    return snapshotOccupancy(snapshot, id);
+  }
+  if (!snapshotContains(geometry, id)) {
+    return -1;
+  }
+  const auto address =
+      static_cast<std::size_t>(snapshotAddress(geometry, id));
+  if (address >= snapshot.expanded_occupancy_states.size()) {
+    return -1;
+  }
+  switch (snapshot.expanded_occupancy_states[address]) {
+  case OccupancyState::FREE:
+    return 0;
+  case OccupancyState::OCCUPIED:
+    return 1;
+  default:
+    return -1;
+  }
+}
+
+double selectedPreciseDistance(const EsdfSnapshot &snapshot,
+                               const Eigen::Vector3d &pos) {
+  bool high = false;
+  const GridGeometry &geometry = selectedGeometry(snapshot, pos, &high);
+  const auto &distances =
+      high ? snapshot.esdf_voxels : snapshot.expanded_esdf_voxels;
+  if (geometry.resolution <= 0.0f || !pos.allFinite()) {
+    return 100000.0;
+  }
+  const Eigen::Vector3f local =
+      (pos.cast<float>() - geometry.origin) / geometry.resolution -
+      Eigen::Vector3f::Constant(0.5f);
+  const Eigen::Vector3i base = local.array().floor().cast<int>();
+  const Eigen::Vector3f frac = local - base.cast<float>();
+  auto distance_at = [&](const Eigen::Vector3i &id) {
+    if (!snapshotContains(geometry, id)) {
+      return 100000.0;
+    }
+    const auto address =
+        static_cast<std::size_t>(snapshotAddress(geometry, id));
+    return address < distances.size() ? static_cast<double>(distances[address].distance)
+                                      : 100000.0;
+  };
+  if (base.x() < 0 || base.y() < 0 || base.z() < 0 ||
+      base.x() + 1 >= geometry.size_x ||
+      base.y() + 1 >= geometry.size_y ||
+      base.z() + 1 >= geometry.size_z) {
+    return distance_at(snapshotIndex(geometry, pos));
+  }
+  double value = 0.0;
+  for (int dx = 0; dx <= 1; ++dx) {
+    for (int dy = 0; dy <= 1; ++dy) {
+      for (int dz = 0; dz <= 1; ++dz) {
+        const Eigen::Vector3i id = base + Eigen::Vector3i(dx, dy, dz);
+        const float wx = dx ? frac.x() : 1.0f - frac.x();
+        const float wy = dy ? frac.y() : 1.0f - frac.y();
+        const float wz = dz ? frac.z() : 1.0f - frac.z();
+        value += static_cast<double>(wx * wy * wz) * distance_at(id);
+      }
+    }
+  }
+  return value;
+}
+
 int snapshotOccupancy(const EsdfSnapshot &snapshot, const Eigen::Vector3i &id) {
   if (!snapshotContains(snapshot.geometry, id)) {
     return -1;
@@ -151,6 +266,7 @@ bool GridMap::isMappingReadyForPlanning() const {
   const auto current = snapshot();
   return task_region_.valid && status.ready_to_move && current &&
          current->task_mapping_active && !current->esdf_voxels.empty() &&
+         !current->expanded_esdf_voxels.empty() &&
          current->mapping_status.position_index == status.position_index;
 }
 
@@ -175,42 +291,12 @@ double GridMap::getDistance(const Eigen::Vector3i &id) const {
 
 double GridMap::getDistance(const Eigen::Vector3d &pos) const {
   const auto selected = querySnapshot();
-  return selected ? snapshotDistance(*selected,
-                                     snapshotIndex(selected->geometry, pos))
-                  : 100000.0;
+  return selected ? selectedDistance(*selected, pos) : 100000.0;
 }
 
 double GridMap::getPreciseDistance(const Eigen::Vector3d &pos) const {
   const auto selected = querySnapshot();
-  if (!selected || selected->geometry.resolution <= 0.0f || !pos.allFinite()) {
-    return 100000.0;
-  }
-  const Eigen::Vector3f local =
-      (pos.cast<float>() - selected->geometry.origin) /
-          selected->geometry.resolution -
-      Eigen::Vector3f::Constant(0.5f);
-  const Eigen::Vector3i base = local.array().floor().cast<int>();
-  const Eigen::Vector3f frac = local - base.cast<float>();
-  if (base.x() < 0 || base.y() < 0 || base.z() < 0 ||
-      base.x() + 1 >= selected->geometry.size_x ||
-      base.y() + 1 >= selected->geometry.size_y ||
-      base.z() + 1 >= selected->geometry.size_z) {
-    return snapshotDistance(*selected, snapshotIndex(selected->geometry, pos));
-  }
-  double value = 0.0;
-  for (int dx = 0; dx <= 1; ++dx) {
-    for (int dy = 0; dy <= 1; ++dy) {
-      for (int dz = 0; dz <= 1; ++dz) {
-        const Eigen::Vector3i id = base + Eigen::Vector3i(dx, dy, dz);
-        const float wx = dx ? frac.x() : 1.0f - frac.x();
-        const float wy = dy ? frac.y() : 1.0f - frac.y();
-        const float wz = dz ? frac.z() : 1.0f - frac.z();
-        value +=
-            static_cast<double>(wx * wy * wz) * snapshotDistance(*selected, id);
-      }
-    }
-  }
-  return value;
+  return selected ? selectedPreciseDistance(*selected, pos) : 100000.0;
 }
 
 int GridMap::getOccupancy(const Eigen::Vector3i &id) const {
@@ -220,9 +306,7 @@ int GridMap::getOccupancy(const Eigen::Vector3i &id) const {
 
 int GridMap::getOccupancy(const Eigen::Vector3d &pos) const {
   const auto selected = querySnapshot();
-  return selected ? snapshotOccupancy(*selected,
-                                      snapshotIndex(selected->geometry, pos))
-                  : -1;
+  return selected ? selectedOccupancy(*selected, pos) : -1;
 }
 
 bool GridMap::isUnknown(const Eigen::Vector3i &id) const {

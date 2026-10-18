@@ -163,12 +163,46 @@ void GridMap::publishEsdfSnapshot() {
   }
   next->esdf_voxels = esdf_volume_.voxels();
   next->camera_position = camera_position_;
+  {
+    std::lock_guard<std::mutex> lock(motion_mutex_);
+    next->motion_position = last_motion_position_;
+  }
   next->tsdf_enabled = tsdf_enabled_;
+  next->expanded_geometry = low_grid_geometry_;
+  next->expanded_tsdf_voxels = low_tsdf_volume_.voxels();
+  next->expanded_occupancy_voxels = low_occupancy_voxels_;
+  next->expanded_occupancy_probabilities.resize(low_occupancy_voxels_.size());
+  next->expanded_occupancy_states.resize(low_occupancy_voxels_.size());
+  for (size_t i = 0; i < low_occupancy_voxels_.size(); ++i) {
+    next->expanded_occupancy_probabilities[i] =
+        low_occupancy_model_.probability(low_occupancy_voxels_[i]);
+    next->expanded_occupancy_states[i] =
+        low_occupancy_model_.state(low_occupancy_voxels_[i]);
+  }
+  next->expanded_esdf_voxels = low_esdf_volume_.voxels();
+  next->expanded_tsdf_enabled = low_tsdf_enabled_;
   const TaskRegion region = taskRegion();
   next->task_mapping_active = region.valid;
+  next->original_roi_polygon = region.original_polygon;
+  next->source_roi_polygon.reserve(region.source_polygon.size());
+  for (const auto & point : region.source_polygon) {
+    next->source_roi_polygon.emplace_back(
+        static_cast<float>(point.x()), static_cast<float>(point.y()));
+  }
   next->task_roi_polygon = region.expanded_polygon;
   next->mapping_status = mappingStatus();
-  next->version = ++snapshot_version_;
+  // Realtime low-resolution refreshes replace the snapshot contents without
+  // creating a new committed high-resolution map version.
+  uint64_t published_version = snapshot_version_;
+  if (global_map_dirty_) {
+    published_version = ++snapshot_version_;
+  } else {
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    if (latest_esdf_snapshot_) {
+      published_version = latest_esdf_snapshot_->version;
+    }
+  }
+  next->version = published_version;
   {
     std::lock_guard<std::mutex> lock(snapshot_mutex_);
     latest_esdf_snapshot_ =

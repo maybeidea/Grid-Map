@@ -75,6 +75,7 @@ struct MappingStatus {
 };
 
 struct EsdfSnapshot {
+  // Compatibility fields: these describe the high-resolution/original map.
   GridGeometry geometry;
   std::vector<TsdfVoxel> tsdf_voxels;
   std::vector<OccupancyVoxel> occupancy_voxels;
@@ -82,8 +83,23 @@ struct EsdfSnapshot {
   std::vector<OccupancyState> occupancy_states;
   std::vector<EsdfVoxel> esdf_voxels;
   Eigen::Vector3f camera_position = Eigen::Vector3f::Zero();
+  // Pose used by the motion gate (normally base_footprint), in map frame.
+  Eigen::Vector3f motion_position = Eigen::Vector3f::Zero();
   bool tsdf_enabled = false;
-  // The same expanded XY rectangle is used as the task ROI and map window.
+  // The expanded low-resolution map is available independently for queries
+  // outside the original high-resolution task window.
+  GridGeometry expanded_geometry;
+  std::vector<TsdfVoxel> expanded_tsdf_voxels;
+  std::vector<OccupancyVoxel> expanded_occupancy_voxels;
+  std::vector<float> expanded_occupancy_probabilities;
+  std::vector<OccupancyState> expanded_occupancy_states;
+  std::vector<EsdfVoxel> expanded_esdf_voxels;
+  bool expanded_tsdf_enabled = false;
+  std::vector<Eigen::Vector2f> original_roi_polygon;
+  // The task polygon before the rectangular map window is derived.  Keeping
+  // this separately lets observation planning score the original ROI rather
+  // than the expanded mapping window.
+  std::vector<Eigen::Vector2f> source_roi_polygon;
   std::vector<Eigen::Vector2f> task_roi_polygon;
   bool task_mapping_active = false;
   MappingStatus mapping_status;
@@ -94,16 +110,25 @@ struct TaskRegion {
   bool valid = false;
   Eigen::Vector2f min = Eigen::Vector2f::Zero();
   Eigen::Vector2f max = Eigen::Vector2f::Zero();
+  Eigen::Vector2f original_min = Eigen::Vector2f::Zero();
+  Eigen::Vector2f original_max = Eigen::Vector2f::Zero();
   float z_min = 0.0f;
   float z_max = 0.0f;
   float expansion_margin = 0.0f;
   float expansion_ratio = 0.0f;
   std::vector<Eigen::Vector2d> source_polygon;
+  std::vector<Eigen::Vector2f> original_polygon;
   std::vector<Eigen::Vector2f> expanded_polygon;
 
   bool contains(float x, float y, float z) const {
     return valid && x >= min.x() && x <= max.x() && y >= min.y() &&
            y <= max.y() && z >= z_min && z <= z_max;
+  }
+
+  bool containsOriginal(float x, float y, float z) const {
+    return valid && x >= original_min.x() && x <= original_max.x() &&
+           y >= original_min.y() && y <= original_max.y() && z >= z_min &&
+           z <= z_max;
   }
 };
 
@@ -141,14 +166,23 @@ public:
   // later through startTaskMapping(), so one GridMap instance can be reused.
   bool configure(float resolution, float map_size_z,
                  float expansion_margin = 0.25f, float expansion_ratio = 0.10f);
+  // Configure the two independent map resolutions. configure() remains the
+  // compatibility entry point for the high-resolution/original map.
+  bool configureDualResolution(float high_resolution, float low_resolution,
+                               float map_size_z,
+                               float expansion_margin = 0.25f,
+                               float expansion_ratio = 0.10f);
 
   // Configure the sensor update increments and occupancy decision thresholds.
   bool configureOccupancy(const occupancy::LogOddsConfig &config);
+  bool configureLowOccupancy(const occupancy::LogOddsConfig &config);
   // Configure occupancy-to-ESDF conversion before starting a task.
   bool configureEsdf(const esdf::EsdfConfig &config);
+  bool configureLowEsdf(const esdf::EsdfConfig &config);
   // Configure optional TSDF fusion before starting a task. Occupancy remains
   // the collision map and is always updated when a task is active.
   bool configureTsdf(bool enabled, float truncation_distance = 0.05f);
+  bool configureLowTsdf(bool enabled, float truncation_distance = 0.05f);
   // Configure the input point-cloud downsampling leaf size.
   bool configurePointCloudFilter(float leaf_size);
   bool configureRegistration(const registration::Config &config);
@@ -228,6 +262,11 @@ private:
   bool processPointCloud(
       const sensor_msgs::msg::PointCloud2::ConstSharedPtr &cloud,
       PreparedCloud *prepared);
+  bool prepareMapPoints(const PreparedCloud &prepared,
+                        const Eigen::Isometry3f &pose,
+                        std::vector<Eigen::Vector3f> *points,
+                        Eigen::Vector3f *camera_position,
+                        bool high_resolution) const;
   bool updateMotionState(const PreparedCloud &prepared, FusionMode *mode);
   void resetMotionState();
   // Separate policy entry points keep temporal and cross-position fusion
@@ -244,7 +283,10 @@ private:
                           std::vector<RayObservation> *observations);
   bool integrateRayObservations(
       const std::vector<RayObservation> &observations,
-      std::vector<OccupancyVoxel> *occupancy, tsdf::TsdfVolume *tsdf);
+      std::vector<OccupancyVoxel> *occupancy, tsdf::TsdfVolume *tsdf,
+      const GridGeometry &geometry,
+      const occupancy::LogOddsModel &model);
+  bool updateLowResolutionMap(const PreparedCloud &prepared);
   void clearLocalMap();
   bool commitLocalMap();
   bool recordSuccessfulFusion();
@@ -255,18 +297,26 @@ private:
   void setCloudAdmission(bool enabled);
 
   GridGeometry grid_geometry_;
+  GridGeometry low_grid_geometry_;
 
   tsdf::TsdfVolume tsdf_volume_;
   tsdf::TsdfVolume local_tsdf_volume_;
+  tsdf::TsdfVolume low_tsdf_volume_;
   bool tsdf_enabled_ = false;
   float tsdf_truncation_distance_ = 0.05f;
+  bool low_tsdf_enabled_ = false;
+  float low_tsdf_truncation_distance_ = 0.05f;
   occupancy::LogOddsModel occupancy_model_;
+  occupancy::LogOddsModel low_occupancy_model_;
   esdf::EsdfConfig esdf_config_;
+  esdf::EsdfConfig low_esdf_config_;
   std::vector<OccupancyVoxel> occupancy_voxels_;
   // Same-position frames are accumulated here until the station quota is
   // reached. They are invisible to queries until commitLocalMap() succeeds.
   std::vector<OccupancyVoxel> local_occupancy_voxels_;
   esdf::EsdfVolume esdf_volume_;
+  std::vector<OccupancyVoxel> low_occupancy_voxels_;
+  esdf::EsdfVolume low_esdf_volume_;
   registration::PointCloudRegistrationBackend registration_backend_;
   std::vector<Eigen::Vector3f> registration_target_points_;
 
@@ -276,6 +326,7 @@ private:
   uint64_t task_generation_ = 0;
   TaskRegion task_region_;
   float resolution_ = 0.05f;
+  float low_resolution_ = 0.03f;
   float map_size_z_ = 0.60f;
   float expansion_margin_ = 0.25f;
   float cloud_leaf_size_ = 0.005f;
@@ -299,6 +350,7 @@ private:
   std::vector<Eigen::Vector3f> local_surface_points_;
   Eigen::Isometry3f station_pose_correction_ = Eigen::Isometry3f::Identity();
   Eigen::Vector3f camera_position_ = Eigen::Vector3f::Zero();
+  Eigen::Vector3f low_camera_position_ = Eigen::Vector3f::Zero();
   std::string map_frame_ = "map";
   std::string cloud_topic_ = "grid_map/cloud";
   // Base pose is preferred for motion gating so arm/camera motion does not
@@ -330,6 +382,7 @@ private:
   bool global_map_ready_for_current_position_ = false;
   bool local_map_cross_position_ = false;
   bool global_map_dirty_ = false;
+  bool low_map_dirty_ = false;
 
   mutable std::mutex motion_mutex_;
   MotionState motion_state_ = MotionState::kWaitingForPose;

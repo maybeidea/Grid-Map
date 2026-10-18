@@ -55,7 +55,17 @@ GridMap::~GridMap() {
 bool GridMap::configure(const float resolution, const float map_size_z,
                         const float expansion_margin,
                         const float expansion_ratio) {
-  if (!std::isfinite(resolution) || resolution <= 0.0f ||
+  return configureDualResolution(resolution, low_resolution_, map_size_z,
+                                 expansion_margin, expansion_ratio);
+}
+
+bool GridMap::configureDualResolution(const float high_resolution,
+                                      const float low_resolution,
+                                      const float map_size_z,
+                                      const float expansion_margin,
+                                      const float expansion_ratio) {
+  if (!std::isfinite(high_resolution) || high_resolution <= 0.0f ||
+      !std::isfinite(low_resolution) || low_resolution <= 0.0f ||
       !std::isfinite(map_size_z) || map_size_z <= 0.0f ||
       !std::isfinite(expansion_margin) || expansion_margin < 0.0f ||
       !std::isfinite(expansion_ratio) || expansion_ratio < 0.0f) {
@@ -65,8 +75,9 @@ bool GridMap::configure(const float resolution, const float map_size_z,
   if (task_region_.valid) {
     return false;
   }
-  resolution_ = resolution;
-  grid_geometry_.resolution = resolution;
+  resolution_ = high_resolution;
+  low_resolution_ = low_resolution;
+  grid_geometry_.resolution = high_resolution;
   map_size_z_ = map_size_z;
   expansion_margin_ = expansion_margin;
   return true;
@@ -78,6 +89,14 @@ bool GridMap::configureOccupancy(const occupancy::LogOddsConfig &config) {
     return false;
   }
   return occupancy_model_.configure(config);
+}
+
+bool GridMap::configureLowOccupancy(const occupancy::LogOddsConfig &config) {
+  std::lock_guard<std::recursive_mutex> lock(task_region_mutex_);
+  if (task_region_.valid) {
+    return false;
+  }
+  return low_occupancy_model_.configure(config);
 }
 
 bool GridMap::configureEsdf(const esdf::EsdfConfig &config) {
@@ -96,6 +115,18 @@ bool GridMap::configureEsdf(const esdf::EsdfConfig &config) {
   return true;
 }
 
+bool GridMap::configureLowEsdf(const esdf::EsdfConfig &config) {
+  std::lock_guard<std::recursive_mutex> lock(task_region_mutex_);
+  if (task_region_.valid || !std::isfinite(config.max_distance) ||
+      config.max_distance < 0.0f || std::isnan(config.unknown_z_min) ||
+      std::isnan(config.unknown_z_max) ||
+      config.unknown_z_min > config.unknown_z_max) {
+    return false;
+  }
+  low_esdf_config_ = config;
+  return true;
+}
+
 bool GridMap::configureTsdf(const bool enabled,
                             const float truncation_distance) {
   if (!std::isfinite(truncation_distance) || truncation_distance <= 0.0f) {
@@ -107,6 +138,20 @@ bool GridMap::configureTsdf(const bool enabled,
   }
   tsdf_enabled_ = enabled;
   tsdf_truncation_distance_ = truncation_distance;
+  return true;
+}
+
+bool GridMap::configureLowTsdf(const bool enabled,
+                               const float truncation_distance) {
+  if (!std::isfinite(truncation_distance) || truncation_distance <= 0.0f) {
+    return false;
+  }
+  std::lock_guard<std::recursive_mutex> lock(task_region_mutex_);
+  if (task_region_.valid) {
+    return false;
+  }
+  low_tsdf_enabled_ = enabled;
+  low_tsdf_truncation_distance_ = truncation_distance;
   return true;
 }
 
@@ -154,40 +199,67 @@ bool GridMap::startTaskMapping(const std::vector<Eigen::Vector2d> &polygon_xy,
   }
 
   std::lock_guard<std::recursive_mutex> lock(task_region_mutex_);
+  const double original_min_x = min_x;
+  const double original_min_y = min_y;
+  const double original_max_x = max_x;
+  const double original_max_y = max_y;
   const double margin = static_cast<double>(expansion_margin_);
   min_x -= margin;
   min_y -= margin;
   max_x += margin;
   max_y += margin;
 
-  const double width = max_x - min_x;
-  const double height = max_y - min_y;
+  const double expanded_width = max_x - min_x;
+  const double expanded_height = max_y - min_y;
 
   invalidateTaskSnapshots();
   task_region_ = TaskRegion{};
   // Activate only after all volumes have been allocated successfully.
   task_region_.min = {static_cast<float>(min_x), static_cast<float>(min_y)};
+  task_region_.original_min = {static_cast<float>(original_min_x),
+                               static_cast<float>(original_min_y)};
   task_region_.z_min = 0.0f;
   task_region_.z_max = map_size_z_;
   task_region_.expansion_margin = expansion_margin_;
   task_region_.source_polygon = polygon;
 
   grid_geometry_.resolution = resolution_;
-  grid_geometry_.origin = {task_region_.min.x(), task_region_.min.y(),
-                           task_region_.z_min};
+  grid_geometry_.origin = {task_region_.original_min.x(),
+                           task_region_.original_min.y(), task_region_.z_min};
 
-  grid_geometry_.size_x =
-      std::max(1, static_cast<int>(std::ceil(width / resolution_)));
-  grid_geometry_.size_y =
-      std::max(1, static_cast<int>(std::ceil(height / resolution_)));
+  grid_geometry_.size_x = std::max(
+      1, static_cast<int>(std::ceil((original_max_x - original_min_x) /
+                                    resolution_)));
+  grid_geometry_.size_y = std::max(
+      1, static_cast<int>(std::ceil((original_max_y - original_min_y) /
+                                    resolution_)));
   grid_geometry_.size_z =
       std::max(1, static_cast<int>(std::ceil(map_size_z_ / resolution_)));
 
-  // Use the actual voxel-aligned map boundary.
-  task_region_.max = {
-      task_region_.min.x() + grid_geometry_.size_x * resolution_,
-      task_region_.min.y() + grid_geometry_.size_y * resolution_};
+  task_region_.original_max = {
+      task_region_.original_min.x() + grid_geometry_.size_x * resolution_,
+      task_region_.original_min.y() + grid_geometry_.size_y * resolution_};
 
+  low_grid_geometry_.resolution = low_resolution_;
+  low_grid_geometry_.origin = {task_region_.min.x(), task_region_.min.y(),
+                               task_region_.z_min};
+  low_grid_geometry_.size_x = std::max(
+      1, static_cast<int>(std::ceil(expanded_width / low_resolution_)));
+  low_grid_geometry_.size_y = std::max(
+      1, static_cast<int>(std::ceil(expanded_height / low_resolution_)));
+  low_grid_geometry_.size_z = std::max(
+      1, static_cast<int>(std::ceil(map_size_z_ / low_resolution_)));
+
+  task_region_.max = {
+      low_grid_geometry_.origin.x() +
+          low_grid_geometry_.size_x * low_resolution_,
+      low_grid_geometry_.origin.y() +
+          low_grid_geometry_.size_y * low_resolution_};
+  task_region_.original_polygon = {
+      {task_region_.original_min.x(), task_region_.original_min.y()},
+      {task_region_.original_max.x(), task_region_.original_min.y()},
+      {task_region_.original_max.x(), task_region_.original_max.y()},
+      {task_region_.original_min.x(), task_region_.original_max.y()}};
   task_region_.expanded_polygon = {
       {task_region_.min.x(), task_region_.min.y()},
       {task_region_.max.x(), task_region_.min.y()},
@@ -215,9 +287,27 @@ bool GridMap::startTaskMapping(const std::vector<Eigen::Vector2d> &polygon_xy,
     tsdf_volume_.clear();
     local_tsdf_volume_.clear();
   }
+  if (low_tsdf_enabled_) {
+    if (!low_tsdf_volume_.configure(low_grid_geometry_,
+                                    low_tsdf_truncation_distance_)) {
+      stopTaskMapping();
+      return false;
+    }
+  } else {
+    low_tsdf_volume_.clear();
+  }
   occupancy_voxels_.assign(voxel_count, OccupancyVoxel{});
   local_occupancy_voxels_.assign(voxel_count, OccupancyVoxel{});
+  const size_t low_voxel_count =
+      static_cast<size_t>(low_grid_geometry_.size_x) *
+      static_cast<size_t>(low_grid_geometry_.size_y) *
+      static_cast<size_t>(low_grid_geometry_.size_z);
+  low_occupancy_voxels_.assign(low_voxel_count, OccupancyVoxel{});
   if (!esdf_volume_.configure(grid_geometry_, esdf_config_)) {
+    stopTaskMapping();
+    return false;
+  }
+  if (!low_esdf_volume_.configure(low_grid_geometry_, low_esdf_config_)) {
     stopTaskMapping();
     return false;
   }
@@ -228,6 +318,8 @@ bool GridMap::startTaskMapping(const std::vector<Eigen::Vector2d> &polygon_xy,
   if (message_out) {
     std::ostringstream stream;
     stream << "task ROI started: source_vertices=" << polygon.size()
+           << " original_resolution=" << resolution_
+           << " expanded_resolution=" << low_resolution_
            << " expanded=[" << task_region_.min.x() << ", "
            << task_region_.min.y() << "]..[" << task_region_.max.x() << ", "
            << task_region_.max.y() << "] map_voxels=[" << grid_geometry_.size_x
@@ -289,9 +381,12 @@ void GridMap::invalidateTaskSnapshots() {
 void GridMap::clearMappingBuffers() {
   tsdf_volume_.clear();
   local_tsdf_volume_.clear();
+  low_tsdf_volume_.clear();
   esdf_volume_.clear();
+  low_esdf_volume_.clear();
   occupancy_voxels_.clear();
   local_occupancy_voxels_.clear();
+  low_occupancy_voxels_.clear();
   registration_target_points_.clear();
   local_ray_observations_.clear();
   local_surface_points_.clear();
@@ -300,6 +395,7 @@ void GridMap::clearMappingBuffers() {
   global_map_ready_for_current_position_ = false;
   local_map_cross_position_ = false;
   global_map_dirty_ = false;
+  low_map_dirty_ = false;
 }
 
 }  // namespace plan_env

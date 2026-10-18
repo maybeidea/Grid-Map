@@ -64,21 +64,23 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node) {
     value = declare_or_get_parameter(node_, name, value);
   };
 
-  // Keep the old plan_env initialization contract. XY dimensions are derived
-  // from the task polygon by the new map, while resolution and Z extent keep
-  // their original grid_map parameter names.
-  const double legacy_resolution =
-      declare_or_get_parameter<double>(node_, "grid_map.resolution", 0.01);
+  // XY dimensions are derived from the task polygon. The old resolution
+  // parameter remains an alias for the high-resolution/original map.
+  const double high_resolution = getParameterWithLegacyAlias(
+      node_, "grid_map.resolution", "grid_map.high_resolution", 0.01);
+  const double low_resolution =
+      declare_or_get_parameter<double>(node_, "grid_map.low_resolution", 0.03);
   const double legacy_map_size_z =
       declare_or_get_parameter<double>(node_, "grid_map.map_size_z", 0.20);
   const double expansion_margin = declare_or_get_parameter<double>(
       node_, "grid_map.expansion_margin", 0.8);
   const double expansion_ratio =
       declare_or_get_parameter<double>(node_, "grid_map.expansion_ratio", 0.10);
-  if (!configure(static_cast<float>(legacy_resolution),
-                 static_cast<float>(legacy_map_size_z),
-                 static_cast<float>(expansion_margin),
-                 static_cast<float>(expansion_ratio))) {
+  if (!configureDualResolution(static_cast<float>(high_resolution),
+                                static_cast<float>(low_resolution),
+                                static_cast<float>(legacy_map_size_z),
+                                static_cast<float>(expansion_margin),
+                                static_cast<float>(expansion_ratio))) {
     RCLCPP_WARN(node_->get_logger(),
                 "GridMap: invalid geometry parameters; keeping defaults "
                 "(resolution=%.3f, map_size_z=%.3f)",
@@ -110,6 +112,27 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node) {
         "GridMap: invalid occupancy probability parameters; using defaults");
     configureOccupancy(occupancy::LogOddsConfig{});
   }
+  occupancy::LogOddsConfig low_occupancy_config;
+  const double low_p_hit = declare_or_get_parameter<double>(
+      node_, "grid_map.low_p_hit", p_hit);
+  const double low_p_miss = declare_or_get_parameter<double>(
+      node_, "grid_map.low_p_miss", p_miss);
+  const double low_p_min = declare_or_get_parameter<double>(
+      node_, "grid_map.low_p_min", p_min);
+  const double low_p_max = declare_or_get_parameter<double>(
+      node_, "grid_map.low_p_max", p_max);
+  const double low_p_occ = declare_or_get_parameter<double>(
+      node_, "grid_map.low_p_occ", p_occ);
+  low_occupancy_config.hit_log_odds = probabilityToLogOdds(low_p_hit, 0.70);
+  low_occupancy_config.miss_log_odds = probabilityToLogOdds(low_p_miss, 0.35);
+  low_occupancy_config.min_log_odds = probabilityToLogOdds(low_p_min, 0.12);
+  low_occupancy_config.max_log_odds = probabilityToLogOdds(low_p_max, 0.97);
+  low_occupancy_config.occupied_threshold =
+      probabilityToLogOdds(low_p_occ, 0.80);
+  low_occupancy_config.free_threshold = 0.0f;
+  if (!configureLowOccupancy(low_occupancy_config)) {
+    configureLowOccupancy(occupancy::LogOddsConfig{});
+  }
 
   const std::string unknown_mode = declare_or_get_parameter<std::string>(
       node_, "grid_map.esdf_unknown_mode", "task_roi");
@@ -138,6 +161,32 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node) {
     RCLCPP_WARN(node_->get_logger(),
                 "GridMap: invalid ESDF parameters; using defaults");
     configureEsdf(esdf::EsdfConfig{});
+  }
+  esdf::EsdfConfig low_esdf_config = esdf_config;
+  const std::string low_unknown_mode = declare_or_get_parameter<std::string>(
+      node_, "grid_map.low_esdf_unknown_mode", unknown_mode);
+  low_esdf_config.unknown_is_occupied = low_unknown_mode != "off";
+  const double low_roi_z_max = declare_or_get_parameter<double>(
+      node_, "grid_map.low_esdf_roi_z_max", roi_z_max);
+  if (low_unknown_mode == "all") {
+    low_esdf_config.unknown_z_min =
+        -std::numeric_limits<float>::infinity();
+    low_esdf_config.unknown_z_max =
+        std::numeric_limits<float>::infinity();
+  } else if (low_unknown_mode == "off") {
+    low_esdf_config.unknown_is_occupied = false;
+  } else {
+    low_esdf_config.unknown_z_min = static_cast<float>(ground_height);
+    low_esdf_config.unknown_z_max = static_cast<float>(low_roi_z_max);
+  }
+  low_esdf_config.signed_distance = declare_or_get_parameter<bool>(
+      node_, "grid_map.low_esdf_signed_distance",
+      esdf_config.signed_distance);
+  low_esdf_config.max_distance = static_cast<float>(
+      declare_or_get_parameter<double>(node_, "grid_map.low_esdf_max_distance",
+                                       esdf_max_distance));
+  if (!configureLowEsdf(low_esdf_config)) {
+    configureLowEsdf(esdf::EsdfConfig{});
   }
 
   parameter("grid_map.cloud_min_map_z", cloud_min_map_z_);
@@ -212,6 +261,15 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node) {
   if (!configureTsdf(tsdf_enabled, tsdf_truncation_distance)) {
     tsdf_enabled_ = false;
     tsdf_truncation_distance_ = 0.05f;
+  }
+  bool low_tsdf_enabled = low_tsdf_enabled_;
+  float low_tsdf_truncation_distance = low_tsdf_truncation_distance_;
+  parameter("grid_map.low_tsdf.enabled", low_tsdf_enabled);
+  parameter("grid_map.low_tsdf.truncation_distance",
+            low_tsdf_truncation_distance);
+  if (!configureLowTsdf(low_tsdf_enabled, low_tsdf_truncation_distance)) {
+    low_tsdf_enabled_ = false;
+    low_tsdf_truncation_distance_ = 0.05f;
   }
   float cloud_leaf_size = static_cast<float>(getParameterWithLegacyAlias(
       node_, "grid_map.cloud_leaf_size", "grid_map.point_cloud_leaf_size",
@@ -296,17 +354,21 @@ bool GridMap::processQueuedCloud(
       !occupancy_updates_enabled_ || !processPointCloudFrame(cloud)) {
     return false;
   }
-  // Local frames are accepted without publishing them. A snapshot is
-  // published only after the local station has been recalibrated and merged
-  // into the global map.
-  if (global_map_dirty_) {
-    global_map_dirty_ = false;
+  // The low-resolution map is published on every accepted cloud. The
+  // high-resolution map is published only after a stationary local map is
+  // committed.
+  if (global_map_dirty_ || low_map_dirty_) {
+    const bool publish_height = global_map_dirty_;
+    low_map_dirty_ = false;
     publishEsdfSnapshot();
-    publishHeightMap();
-    return true;
+    global_map_dirty_ = false;
+    if (publish_height) {
+      publishHeightMap();
+    }
+    return publish_height;
   }
-  // A local-only update is intentionally not reported as a committed map
-  // update to callers that use this return value as a planning-ready signal.
+  // A high-resolution local-only update is intentionally not reported as a
+  // planning-ready global-map commit.
   return false;
 }
 
@@ -319,6 +381,10 @@ bool GridMap::processPointCloudFrame(
   if (!processPointCloud(cloud, &prepared)) {
     return false;
   }
+
+  // The expanded low-resolution map is a realtime layer. It follows the
+  // current TF pose and is updated even while the base is moving.
+  const bool low_updated = updateLowResolutionMap(prepared);
 
   FusionMode mode = FusionMode::kSamePosition;
   if (!updateMotionState(prepared, &mode)) {
@@ -333,32 +399,18 @@ bool GridMap::processPointCloudFrame(
                            status.stationary_frame_count,
                            status.stationary_frames_min);
     }
-    return false;
+    return low_updated;
   }
 
   // The station is accumulated in its odometry/TF pose. Cross-position
   // registration is intentionally delayed until the complete local map is
   // available, immediately before the global commit.
-  Eigen::Isometry3f pose = station_pose_correction_ * prepared.prior_pose;
-
   std::vector<Eigen::Vector3f> transformed_points;
-  transformed_points.reserve(prepared.sensor_points.size());
-  const TaskRegion region = taskRegion();
-  for (const auto &point : prepared.sensor_points) {
-    const Eigen::Vector3f point_map = pose * point;
-    const bool clearing_ground =
-        cloud_low_z_clear_rays_ && point_map.z() < cloud_min_map_z_;
-    if (region.valid &&
-        !region.contains(point_map.x(), point_map.y(),
-                         clearing_ground ? std::max(point_map.z(), region.z_min)
-                                         : point_map.z())) {
-      continue;
-    }
-    if (point_map.z() < cloud_min_map_z_ && !cloud_low_z_clear_rays_) {
-      continue;
-    }
-    transformed_points.push_back(point_map);
-  }
+  Eigen::Vector3f high_camera_position = Eigen::Vector3f::Zero();
+  const Eigen::Isometry3f high_pose =
+      station_pose_correction_ * prepared.prior_pose;
+  prepareMapPoints(prepared, high_pose, &transformed_points,
+                   &high_camera_position, true);
   if (transformed_points.empty()) {
     if (node_) {
       RCLCPP_WARN_THROTTLE(
@@ -369,7 +421,7 @@ bool GridMap::processPointCloudFrame(
     return false;
   }
   cloud_points_ = std::move(transformed_points);
-  camera_position_ = pose.translation();
+  camera_position_ = high_camera_position;
   if (!fuseSamePositionFrame()) {
     if (node_) {
       RCLCPP_WARN_THROTTLE(
@@ -418,6 +470,71 @@ bool GridMap::processPointCloudFrame(
       motion_state_ = MotionState::kStationaryCollecting;
     }
   }
+  return true;
+}
+
+bool GridMap::prepareMapPoints(const PreparedCloud &prepared,
+                               const Eigen::Isometry3f &pose,
+                               std::vector<Eigen::Vector3f> *points,
+                               Eigen::Vector3f *camera_position,
+                               const bool high_resolution) const {
+  if (!points || !camera_position) {
+    return false;
+  }
+  points->clear();
+  points->reserve(prepared.sensor_points.size());
+  *camera_position = pose.translation();
+  const TaskRegion region = taskRegion();
+  for (const auto &point : prepared.sensor_points) {
+    const Eigen::Vector3f point_map = pose * point;
+    const bool clearing_ground =
+        cloud_low_z_clear_rays_ && point_map.z() < cloud_min_map_z_;
+    const bool inside = high_resolution
+                            ? region.containsOriginal(
+                                  point_map.x(), point_map.y(),
+                                  clearing_ground
+                                      ? std::max(point_map.z(), region.z_min)
+                                      : point_map.z())
+                            : region.contains(
+                                  point_map.x(), point_map.y(),
+                                  clearing_ground
+                                      ? std::max(point_map.z(), region.z_min)
+                                      : point_map.z());
+    if (!inside) {
+      continue;
+    }
+    if (point_map.z() < cloud_min_map_z_ && !cloud_low_z_clear_rays_) {
+      continue;
+    }
+    points->push_back(point_map);
+  }
+  return !points->empty();
+}
+
+bool GridMap::updateLowResolutionMap(const PreparedCloud &prepared) {
+  std::vector<Eigen::Vector3f> points;
+  Eigen::Vector3f camera_position;
+  if (!prepareMapPoints(prepared, prepared.prior_pose, &points,
+                        &camera_position, false)) {
+    return false;
+  }
+  std::vector<RayObservation> observations;
+  observations.reserve(points.size());
+  for (const auto &point : points) {
+    observations.push_back(
+        RayObservation{camera_position, point,
+                       point.z() < cloud_min_map_z_});
+  }
+  if (!integrateRayObservations(observations, &low_occupancy_voxels_,
+                                low_tsdf_enabled_ ? &low_tsdf_volume_ : nullptr,
+                                low_grid_geometry_, low_occupancy_model_)) {
+    return false;
+  }
+  low_camera_position_ = camera_position;
+  if (!low_esdf_volume_.compute(low_occupancy_voxels_, low_occupancy_model_)) {
+    return false;
+  }
+  low_map_dirty_ = true;
   return true;
 }
 
@@ -623,7 +740,8 @@ bool GridMap::updateMapsFromRays(
     frame_observations.push_back(RayObservation{ray_origin, point, low_z});
   }
   if (frame_observations.empty() ||
-      !integrateRayObservations(frame_observations, occupancy, tsdf)) {
+      !integrateRayObservations(frame_observations, occupancy, tsdf,
+                                grid_geometry_, occupancy_model_)) {
     return false;
   }
   if (observations) {
@@ -648,31 +766,33 @@ bool GridMap::updateMapsFromRays(
 
 bool GridMap::integrateRayObservations(
     const std::vector<RayObservation> &observations,
-    std::vector<OccupancyVoxel> *occupancy, tsdf::TsdfVolume *tsdf) {
-  if (!occupancy || occupancy->empty() || grid_geometry_.resolution <= 0.0f) {
+    std::vector<OccupancyVoxel> *occupancy, tsdf::TsdfVolume *tsdf,
+    const GridGeometry &geometry, const occupancy::LogOddsModel &model) {
+  if (!occupancy || occupancy->empty() || geometry.resolution <= 0.0f) {
     return false;
   }
-  const Eigen::Vector3i grid_size(grid_geometry_.size_x, grid_geometry_.size_y,
-                                  grid_geometry_.size_z);
+  const Eigen::Vector3i grid_size(geometry.size_x, geometry.size_y,
+                                  geometry.size_z);
   bool integrated_voxel = false;
   for (const auto &observation : observations) {
     const Eigen::Vector3f &ray_origin = observation.origin;
     const Eigen::Vector3f &point = observation.endpoint;
     const bool low_z = observation.low_z;
     const bool endpoint_in_grid = ray_casting::pointInGrid(
-        grid_geometry_.origin, grid_geometry_.resolution, grid_size, point);
+        geometry.origin, geometry.resolution, grid_size, point);
     ray_casting::traverseRay(
-        grid_geometry_.origin, grid_geometry_.resolution, grid_size, ray_origin,
-        point,
-        [this, occupancy, tsdf, &ray_origin, &point, &integrated_voxel,
-         endpoint_in_grid, low_z](const Eigen::Vector3i &voxel_id, bool hit) {
-          const int address = toAddress(voxel_id);
+        geometry.origin, geometry.resolution, grid_size, ray_origin, point,
+        [this, occupancy, tsdf, &geometry, &model, &ray_origin, &point,
+         &integrated_voxel, endpoint_in_grid,
+         low_z](const Eigen::Vector3i &voxel_id, bool hit) {
+          const int address = voxel_id.x() * geometry.size_y * geometry.size_z +
+                              voxel_id.y() * geometry.size_z + voxel_id.z();
           if (address < 0 ||
               static_cast<size_t>(address) >= occupancy->size()) {
             return;
           }
           integrated_voxel = true;
-          occupancy_model_.update((*occupancy)[address], hit && !low_z);
+          model.update((*occupancy)[address], hit && !low_z);
           if (tsdf && endpoint_in_grid && !low_z) {
             tsdf->integrateVoxel(voxel_id, ray_origin, point);
           }
@@ -728,8 +848,9 @@ bool GridMap::commitLocalMap() {
     corrected.endpoint = recalibration * observation.endpoint;
     corrected_observations.push_back(corrected);
   }
-  if (!integrateRayObservations(corrected_observations, &occupancy_voxels_,
-                                tsdf_enabled_ ? &tsdf_volume_ : nullptr)) {
+    if (!integrateRayObservations(corrected_observations, &occupancy_voxels_,
+                                  tsdf_enabled_ ? &tsdf_volume_ : nullptr,
+                                  grid_geometry_, occupancy_model_)) {
     return false;
   }
 

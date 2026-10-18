@@ -70,13 +70,13 @@ void transformVolume(std::vector<float> *distance, int sx, int sy, int sz) {
   const auto address = [sy, sz](int x, int y, int z) {
     return static_cast<std::size_t>(x * sy * sz + y * sz + z);
   };
-  std::vector<float> input;
-  std::vector<float> output;
-  input.reserve(static_cast<std::size_t>(std::max(sx, std::max(sy, sz))));
-  output.reserve(input.capacity());
+#pragma omp parallel for schedule(static)
   for (int y = 0; y < sy; ++y) {
     for (int z = 0; z < sz; ++z) {
-      input.clear();
+      std::vector<float> input;
+      std::vector<float> output;
+      input.reserve(static_cast<std::size_t>(sx));
+      output.reserve(static_cast<std::size_t>(sx));
       for (int x = 0; x < sx; ++x) {
         input.push_back((*distance)[address(x, y, z)]);
       }
@@ -86,9 +86,13 @@ void transformVolume(std::vector<float> *distance, int sx, int sy, int sz) {
       }
     }
   }
+#pragma omp parallel for schedule(static)
   for (int x = 0; x < sx; ++x) {
     for (int z = 0; z < sz; ++z) {
-      input.clear();
+      std::vector<float> input;
+      std::vector<float> output;
+      input.reserve(static_cast<std::size_t>(sy));
+      output.reserve(static_cast<std::size_t>(sy));
       for (int y = 0; y < sy; ++y) {
         input.push_back((*distance)[address(x, y, z)]);
       }
@@ -98,9 +102,13 @@ void transformVolume(std::vector<float> *distance, int sx, int sy, int sz) {
       }
     }
   }
+#pragma omp parallel for schedule(static)
   for (int x = 0; x < sx; ++x) {
     for (int y = 0; y < sy; ++y) {
-      input.clear();
+      std::vector<float> input;
+      std::vector<float> output;
+      input.reserve(static_cast<std::size_t>(sz));
+      output.reserve(static_cast<std::size_t>(sz));
       for (int z = 0; z < sz; ++z) {
         input.push_back((*distance)[address(x, y, z)]);
       }
