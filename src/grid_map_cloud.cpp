@@ -5,6 +5,8 @@
 
 #include <cmath>
 #include <limits>
+#include <queue>
+#include <unordered_set>
 #include <utility>
 
 #include <geometry_msgs/msg/transform_stamped.hpp>
@@ -191,6 +193,10 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node) {
 
   parameter("grid_map.cloud_min_map_z", cloud_min_map_z_);
   parameter("grid_map.cloud_low_z_clear_rays", cloud_low_z_clear_rays_);
+  parameter("grid_map.support_filter.enabled", support_filter_enabled_);
+  parameter("grid_map.support_filter.ground_z", support_filter_ground_z_);
+  parameter("grid_map.support_filter.ground_band",
+            support_filter_ground_band_);
   parameter("grid_map.cloud_min_range", cloud_min_range_);
   parameter("grid_map.local_update_range_x", local_update_range_.x());
   parameter("grid_map.local_update_range_y", local_update_range_.y());
@@ -200,6 +206,13 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node) {
   }
   if (!std::isfinite(cloud_min_range_) || cloud_min_range_ < 0.0) {
     cloud_min_range_ = 0.2;
+  }
+  if (!std::isfinite(support_filter_ground_z_)) {
+    support_filter_ground_z_ = 0.0f;
+  }
+  if (!std::isfinite(support_filter_ground_band_) ||
+      support_filter_ground_band_ < 0.0f) {
+    support_filter_ground_band_ = 0.02f;
   }
   if (!local_update_range_.allFinite() ||
       (local_update_range_.array() <= 0.0f).any()) {
@@ -739,6 +752,7 @@ bool GridMap::updateMapsFromRays(
     }
     frame_observations.push_back(RayObservation{ray_origin, point, low_z});
   }
+  filterUnsupportedInteriorObservations(&frame_observations);
   if (frame_observations.empty() ||
       !integrateRayObservations(frame_observations, occupancy, tsdf,
                                 grid_geometry_, occupancy_model_)) {
@@ -762,6 +776,99 @@ bool GridMap::updateMapsFromRays(
         local_surface_points_.begin() + static_cast<std::ptrdiff_t>(excess));
   }
   return true;
+}
+
+void GridMap::filterUnsupportedInteriorObservations(
+    std::vector<RayObservation> *observations) const {
+  if (!support_filter_enabled_ || !observations ||
+      grid_geometry_.resolution <= 0.0f || observations->empty()) {
+    return;
+  }
+
+  const Eigen::Vector3i size(grid_geometry_.size_x, grid_geometry_.size_y,
+                             grid_geometry_.size_z);
+  const auto indexOf = [this](const Eigen::Vector3f &point) {
+    return ((point - grid_geometry_.origin) / grid_geometry_.resolution)
+        .array()
+        .floor()
+        .cast<int>()
+        .matrix();
+  };
+  const auto addressOf = [&size](const Eigen::Vector3i &id) {
+    return (id.x() * size.y() + id.y()) * size.z() + id.z();
+  };
+  const auto isBoundary = [&size](const Eigen::Vector3i &id) {
+    return id.x() == 0 || id.y() == 0 || id.z() == 0 ||
+           id.x() == size.x() - 1 || id.y() == size.y() - 1 ||
+           id.z() == size.z() - 1;
+  };
+
+  std::unordered_set<int> candidates;
+  for (const auto &observation : *observations) {
+    if (observation.low_z ||
+        !ray_casting::pointInGrid(grid_geometry_.origin,
+                                  grid_geometry_.resolution, size,
+                                  observation.endpoint)) {
+      continue;
+    }
+    const Eigen::Vector3i id = indexOf(observation.endpoint);
+    if (!isBoundary(id)) {
+      candidates.insert(addressOf(id));
+    }
+  }
+  if (candidates.empty()) {
+    return;
+  }
+
+  std::unordered_set<int> supported;
+  std::queue<Eigen::Vector3i> queue;
+  for (const int address : candidates) {
+    const int z = address % size.z();
+    const int y = (address / size.z()) % size.y();
+    const int x = address / (size.y() * size.z());
+    const float center_z = grid_geometry_.origin.z() +
+                           (static_cast<float>(z) + 0.5f) *
+                               grid_geometry_.resolution;
+    if (std::abs(center_z - support_filter_ground_z_) <=
+        support_filter_ground_band_) {
+      queue.emplace(x, y, z);
+      supported.insert(address);
+    }
+  }
+  constexpr int kNeighborOffsets[6][3] = {
+      {1, 0, 0}, {-1, 0, 0}, {0, 1, 0},
+      {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+  while (!queue.empty()) {
+    const Eigen::Vector3i current = queue.front();
+    queue.pop();
+    for (const auto &offset : kNeighborOffsets) {
+      const Eigen::Vector3i next =
+          current + Eigen::Vector3i(offset[0], offset[1], offset[2]);
+      if (isBoundary(next)) {
+        continue;
+      }
+      const int address = addressOf(next);
+      if (candidates.count(address) != 0 && supported.insert(address).second) {
+        queue.push(next);
+      }
+    }
+  }
+
+  observations->erase(
+      std::remove_if(observations->begin(), observations->end(),
+                     [&](const RayObservation &observation) {
+                       if (observation.low_z ||
+                           !ray_casting::pointInGrid(
+                               grid_geometry_.origin,
+                               grid_geometry_.resolution, size,
+                               observation.endpoint)) {
+                         return false;
+                       }
+                       const Eigen::Vector3i id = indexOf(observation.endpoint);
+                       return !isBoundary(id) &&
+                              supported.count(addressOf(id)) == 0;
+                     }),
+      observations->end());
 }
 
 bool GridMap::integrateRayObservations(

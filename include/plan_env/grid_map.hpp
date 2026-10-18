@@ -281,6 +281,8 @@ private:
   bool updateMapsFromRays(std::vector<OccupancyVoxel> *occupancy,
                           tsdf::TsdfVolume *tsdf,
                           std::vector<RayObservation> *observations);
+  void filterUnsupportedInteriorObservations(
+      std::vector<RayObservation> *observations) const;
   bool integrateRayObservations(
       const std::vector<RayObservation> &observations,
       std::vector<OccupancyVoxel> *occupancy, tsdf::TsdfVolume *tsdf,
@@ -332,6 +334,9 @@ private:
   float cloud_leaf_size_ = 0.005f;
   double cloud_min_map_z_ = 0.02;
   bool cloud_low_z_clear_rays_ = false;
+  bool support_filter_enabled_ = false;
+  float support_filter_ground_z_ = 0.0f;
+  float support_filter_ground_band_ = 0.02f;
   double cloud_min_range_ = 0.2;
   Eigen::Vector3f local_update_range_{5.0f, 5.0f, 3.0f};
   bool height_map_enable_ = true;
