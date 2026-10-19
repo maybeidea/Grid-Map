@@ -335,7 +335,7 @@ bool ObservationPlanner::plan(
 
   std::vector<Eigen::Vector2d> remaining_wipeable;
   for (const auto & cell : wipeable) {
-    if (!nearAny(cell, wiped_cells_, 0.5 * config_.candidate_spacing)) {
+    if (!nearAny(cell, wiped_cells_, 0.75 * grid.resolution)) {
       remaining_wipeable.push_back(cell);
     }
   }
@@ -425,12 +425,13 @@ bool ObservationPlanner::plan(
     return true;
   }
 
-  const bool unknown_complete = metrics.unknown_ratio <= config_.max_unknown_ratio;
   const bool enough_region = metrics.wipeable_region_found;
-  if (metrics.opening_found && enough_region && unknown_complete) {
+  // A complete observation finds one usable wipe region. Unknown cells
+  // elsewhere in the task ROI belong to later observation rounds.
+  if (enough_region) {
     plan_out->valid = true;
     plan_out->complete = true;
-    plan_out->reason = "observation_complete";
+    plan_out->reason = "wipeable_region_observed";
     return true;
   }
 
@@ -476,6 +477,13 @@ bool ObservationPlanner::plan(
   // targets.  This is the important difference from the old wall-candidate
   // logic: the first view is chosen by expected unknown reduction, then later
   // views are selected only when the map gate has committed the new station.
+  // Unknown cells are a dense frontier at high resolution.  Collapse nearby
+  // cells before the expensive visibility scoring so planning cost depends on
+  // the candidate spacing rather than on every voxel in the ROI.
+  std::vector<std::pair<Eigen::Vector2d, Eigen::Vector2d>> frontier_seeds;
+  frontier_seeds.reserve(config_.max_candidates);
+  const std::size_t frontier_limit = std::max<std::size_t>(1, config_.max_candidates);
+  const auto &expanded = snapshot.expanded_geometry;
   for (int y = 0; y < grid.height; ++y) {
     for (int x = 0; x < grid.width; ++x) {
       if (grid.state[grid.index(x, y)] != 2) continue;
@@ -483,40 +491,58 @@ bool ObservationPlanner::plan(
       if (!pointInPolygon(point, polygon)) continue;
       const Eigen::Vector2d inward = (centroid - point).normalized();
       const Eigen::Vector2d position = point - inward * config_.candidate_standoff;
-      const auto &expanded = snapshot.expanded_geometry;
       if (expanded.size_x <= 0 || expanded.size_y <= 0 ||
           position.x() < expanded.origin.x() ||
           position.x() > expanded.origin.x() + expanded.size_x * expanded.resolution ||
           position.y() < expanded.origin.y() ||
           position.y() > expanded.origin.y() + expanded.size_y * expanded.resolution)
         continue;
-      ObservationTarget candidate;
-      candidate.xy = position;
-      candidate.yaw = std::atan2(point.y() - position.y(),
-                                 point.x() - position.x());
-      for (int yy = 0; yy < grid.height; ++yy) {
-        for (int xx = 0; xx < grid.width; ++xx) {
-          const Eigen::Vector2d cell = grid.position(xx, yy);
-          if ((cell - position).norm() > config_.sensor_range ||
-              std::abs(wrapAngle(std::atan2(cell.y() - position.y(),
-                                            cell.x() - position.x()) -
-                                 candidate.yaw)) > config_.sensor_half_fov ||
-              !rayVisible(grid, position, cell, true))
-            continue;
-          const uint8_t state = grid.state[grid.index(xx, yy)];
-          if (state == 2) ++candidate.visible_unknown;
-          if (state == 0 && nearAny(cell, remaining_wipeable,
-                                     grid.resolution * 1.5))
-            ++candidate.visible_wipeable;
+      bool duplicate = false;
+      for (const auto &seed : frontier_seeds) {
+        if ((seed.first - position).squaredNorm() <=
+            config_.candidate_spacing * config_.candidate_spacing) {
+          duplicate = true;
+          break;
         }
       }
-      candidate.score = static_cast<double>(candidate.visible_unknown) +
-                        0.5 * static_cast<double>(candidate.visible_wipeable);
-      if (nearAny(candidate.xy, visited_targets, config_.candidate_spacing))
-        candidate.score *= 0.05;
-      candidate.score -= config_.travel_penalty * (candidate.xy - current_xy).norm();
-      if (candidate.visible_unknown > 0) candidates.push_back(candidate);
+      if (!duplicate) {
+        frontier_seeds.emplace_back(position, point);
+        if (frontier_seeds.size() >= frontier_limit) break;
+      }
     }
+    if (frontier_seeds.size() >= frontier_limit) break;
+  }
+  const int score_stride = std::max(
+      1, static_cast<int>(std::ceil(0.04 / std::max(grid.resolution, 1e-3))));
+  for (const auto &seed : frontier_seeds) {
+    const Eigen::Vector2d &position = seed.first;
+    const Eigen::Vector2d &point = seed.second;
+    ObservationTarget candidate;
+    candidate.xy = position;
+    candidate.yaw = std::atan2(point.y() - position.y(),
+                               point.x() - position.x());
+    for (int yy = 0; yy < grid.height; yy += score_stride) {
+      for (int xx = 0; xx < grid.width; xx += score_stride) {
+        const Eigen::Vector2d cell = grid.position(xx, yy);
+        if ((cell - position).norm() > config_.sensor_range ||
+            std::abs(wrapAngle(std::atan2(cell.y() - position.y(),
+                                          cell.x() - position.x()) -
+                               candidate.yaw)) > config_.sensor_half_fov ||
+            !rayVisible(grid, position, cell, true))
+          continue;
+        const uint8_t state = grid.state[grid.index(xx, yy)];
+        if (state == 2) ++candidate.visible_unknown;
+        if (state == 0 && nearAny(cell, remaining_wipeable,
+                                   grid.resolution * 1.5))
+          ++candidate.visible_wipeable;
+      }
+    }
+    candidate.score = static_cast<double>(candidate.visible_unknown) +
+                      0.5 * static_cast<double>(candidate.visible_wipeable);
+    if (nearAny(candidate.xy, visited_targets, config_.candidate_spacing))
+      candidate.score *= 0.05;
+    candidate.score -= config_.travel_penalty * (candidate.xy - current_xy).norm();
+    if (candidate.visible_unknown > 0) candidates.push_back(candidate);
   }
   std::sort(candidates.begin(), candidates.end(),
             [](const ObservationTarget &a, const ObservationTarget &b) {

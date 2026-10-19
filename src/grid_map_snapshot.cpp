@@ -181,6 +181,7 @@ void GridMap::publishEsdfSnapshot() {
   }
   next->expanded_esdf_voxels = low_esdf_volume_.voxels();
   next->expanded_tsdf_enabled = low_tsdf_enabled_;
+  next->esdf_current = esdf_initialized_;
   const TaskRegion region = taskRegion();
   next->task_mapping_active = region.valid;
   next->original_roi_polygon = region.original_polygon;

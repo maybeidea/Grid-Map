@@ -396,6 +396,8 @@ void GridMap::clearMappingBuffers() {
   local_map_cross_position_ = false;
   global_map_dirty_ = false;
   low_map_dirty_ = false;
+  last_esdf_occupancy_states_.clear();
+  esdf_initialized_ = false;
 }
 
 }  // namespace plan_env

@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cerrno>
 #include <cmath>
+#include <cstring>
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
@@ -115,6 +116,31 @@ void setPixel(std::vector<uint8_t> &rgb, const size_t index, const uint8_t red,
   rgb[offset + 2] = blue;
 }
 
+sensor_msgs::msg::PointCloud2 toPointCloud2(
+    const pcl::PointCloud<pcl::PointXYZI> &cloud,
+    const std_msgs::msg::Header &header) {
+  sensor_msgs::msg::PointCloud2 message;
+  if (cloud.empty()) {
+    message.height = 1;
+    message.width = 0;
+    message.is_bigendian = false;
+    message.is_dense = true;
+    message.point_step = sizeof(float) * 4;
+    message.fields.resize(4);
+    const char *names[] = {"x", "y", "z", "intensity"};
+    for (std::size_t i = 0; i < 4; ++i) {
+      message.fields[i].name = names[i];
+      message.fields[i].offset = static_cast<std::uint32_t>(i * sizeof(float));
+      message.fields[i].datatype = sensor_msgs::msg::PointField::FLOAT32;
+      message.fields[i].count = 1;
+    }
+  } else {
+    pcl::toROSMsg(cloud, message);
+  }
+  message.header = header;
+  return message;
+}
+
 class GridMapStandaloneTest : public rclcpp::Node {
 public:
   GridMapStandaloneTest() : Node("grid_map_standalone_test") {
@@ -126,6 +152,8 @@ public:
         "heightmap_topic", "/grid_map/heightmap");
     const std::string esdf_topic =
         declare_parameter<std::string>("esdf_topic", "/grid_map/esdf_slice");
+    const std::string occupancy_3d_topic = declare_parameter<std::string>(
+        "occupancy_3d_topic", "/grid_map/occupied_voxels");
     esdf_slice_z_ = declare_parameter<double>("esdf_slice_z", 0.10);
     visualization_dir_ =
         declare_parameter<std::string>("visualization_dir", PLAN_ENV_VIS_DIR);
@@ -147,19 +175,32 @@ public:
         create_publisher<nav_msgs::msg::OccupancyGrid>(height_topic, latched);
     esdf_pub_ =
         create_publisher<sensor_msgs::msg::PointCloud2>(esdf_topic, latched);
+    occupancy_3d_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
+        occupancy_3d_topic, latched);
+    mapping_status_pub_ = create_publisher<std_msgs::msg::String>(
+        "/grid_map/mapping_status", latched);
     task_sub_ = create_subscription<std_msgs::msg::String>(
         task_topic, latched,
         [this](const std_msgs::msg::String::ConstSharedPtr message) {
           onTask(message->data);
         });
+    // Full-resolution stride=1 frames can contain hundreds of thousands of
+    // points. Use reliable delivery so large fragmented samples are not
+    // silently dropped by a best-effort sensor QoS profile.
     cloud_monitor_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-        cloud_topic_, rclcpp::SensorDataQoS(),
+        cloud_topic_, rclcpp::QoS(10).reliable(),
         [this](const sensor_msgs::msg::PointCloud2::ConstSharedPtr message) {
           ++cloud_messages_total_;
           ++cloud_messages_for_task_;
           last_cloud_frame_ = message->header.frame_id;
           last_cloud_point_count_ =
               static_cast<uint64_t>(message->width) * message->height;
+          // Forward the received sample through GridMap's thread-safe mailbox
+          // as a fallback for large fragmented DDS samples that can bypass
+          // the library subscription while the monitor still receives them.
+          if (map_) {
+            map_->pointCloudCallback(message);
+          }
           recordBagMessage(*message, cloud_topic_, message->header.stamp);
         });
     tf_sub_ = create_subscription<tf2_msgs::msg::TFMessage>(
@@ -178,9 +219,9 @@ public:
 
     RCLCPP_INFO(get_logger(),
                 "standalone GridMap ready: task=%s cloud=%s "
-                "heightmap=%s esdf=%s",
+                "heightmap=%s esdf=%s occupancy3d=%s",
                 task_topic.c_str(), cloud_topic_.c_str(), height_topic.c_str(),
-                esdf_topic.c_str());
+                esdf_topic.c_str(), occupancy_3d_topic.c_str());
   }
 
   void initializeMap() {
@@ -263,6 +304,19 @@ private:
     if (!initialized_) {
       return;
     }
+    const auto mapping_status = map_->mappingStatus();
+    Json status_json;
+    status_json["ready_to_move"] = mapping_status.ready_to_move;
+    status_json["position_index"] = mapping_status.position_index;
+    status_json["stationary_frame_count"] =
+        mapping_status.stationary_frame_count;
+    status_json["stationary_frames_required"] =
+        mapping_status.stationary_frames_required;
+    status_json["motion_state"] =
+        motionStateName(mapping_status.motion_state);
+    std_msgs::msg::String status_message;
+    status_message.data = status_json.dump();
+    mapping_status_pub_->publish(status_message);
     const auto snapshot = map_->snapshot();
     if (!snapshot || !snapshot->task_mapping_active) {
       logWaitingForSnapshot(snapshot);
@@ -288,6 +342,7 @@ private:
                        -1);
 
     pcl::PointCloud<pcl::PointXYZI> esdf;
+    pcl::PointCloud<pcl::PointXYZI> occupied_voxels;
     const int slice =
         std::max(0, std::min(geometry.size_z - 1,
                              static_cast<int>(std::floor(
@@ -354,6 +409,22 @@ private:
         point.z = geometry.origin.z() + (slice + 0.5f) * geometry.resolution;
         point.intensity = snapshot->esdf_voxels[address].distance;
         esdf.push_back(point);
+
+        for (int z = 0; z < geometry.size_z; ++z) {
+          const size_t voxel_address = static_cast<size_t>(
+              (x * geometry.size_y + y) * geometry.size_z + z);
+          if (voxel_address >= snapshot->occupancy_states.size() ||
+              snapshot->occupancy_states[voxel_address] !=
+                  OccupancyState::OCCUPIED) {
+            continue;
+          }
+          pcl::PointXYZI occupied;
+          occupied.x = geometry.origin.x() + (x + 0.5f) * geometry.resolution;
+          occupied.y = geometry.origin.y() + (y + 0.5f) * geometry.resolution;
+          occupied.z = geometry.origin.z() + (z + 0.5f) * geometry.resolution;
+          occupied.intensity = snapshot->occupancy_probabilities[voxel_address];
+          occupied_voxels.push_back(occupied);
+        }
       }
     }
 
@@ -361,10 +432,13 @@ private:
     esdf.width = static_cast<uint32_t>(esdf.size());
     esdf.height = 1;
     esdf.is_dense = true;
-    sensor_msgs::msg::PointCloud2 esdf_message;
-    pcl::toROSMsg(esdf, esdf_message);
-    esdf_message.header = height.header;
+    sensor_msgs::msg::PointCloud2 esdf_message =
+        toPointCloud2(esdf, height.header);
     esdf_pub_->publish(esdf_message);
+
+    sensor_msgs::msg::PointCloud2 occupancy_message =
+        toPointCloud2(occupied_voxels, height.header);
+    occupancy_3d_pub_->publish(occupancy_message);
 
     if (snapshot->version != last_visualized_version_ &&
         saveVisualizations(*snapshot, height, geometry)) {
@@ -533,6 +607,8 @@ private:
     esdf_data["layout"] = "x-major, then y, then z";
     esdf_data["occupancy_semantics"] =
         "1=occupied (distance<=0), 0=free (distance>0), null=unknown";
+    esdf_data["occupancy_state_semantics"] =
+        "ASCII 0=free, 1=occupied, 2=unknown";
     Json occupancy = Json::array();
     occupancy.get_ref<Json::array_t &>().reserve(voxel_count);
     for (size_t index = 0; index < voxel_count; ++index) {
@@ -547,6 +623,45 @@ private:
       }
     }
     esdf_data["occupancy"] = std::move(occupancy);
+    std::string occupancy_states;
+    occupancy_states.reserve(voxel_count);
+    for (size_t index = 0; index < voxel_count; ++index) {
+      if (index < snapshot.occupancy_states.size()) {
+        occupancy_states.push_back(static_cast<char>(
+            '0' + static_cast<int>(snapshot.occupancy_states[index])));
+      } else {
+        occupancy_states.push_back('2');
+      }
+    }
+    esdf_data["occupancy_state"] = std::move(occupancy_states);
+    const std::string esdf_distance_path =
+        visualization_dir_ + "/" + stem.str() + "_esdf_distance.f32";
+    std::ofstream distance_output(esdf_distance_path, std::ios::binary);
+    if (!distance_output) {
+      RCLCPP_ERROR(get_logger(), "cannot write ESDF distances: %s",
+                   esdf_distance_path.c_str());
+      return false;
+    }
+    for (size_t index = 0; index < voxel_count; ++index) {
+      const float distance =
+          index < snapshot.esdf_voxels.size() &&
+                  std::isfinite(snapshot.esdf_voxels[index].distance)
+              ? snapshot.esdf_voxels[index].distance
+              : std::numeric_limits<float>::quiet_NaN();
+      static_assert(sizeof(float) == sizeof(uint32_t),
+                    "ESDF binary output requires 32-bit floats");
+      uint32_t bits;
+      std::memcpy(&bits, &distance, sizeof(bits));
+      const uint8_t bytes[] = {static_cast<uint8_t>(bits & 0xff),
+                               static_cast<uint8_t>((bits >> 8) & 0xff),
+                               static_cast<uint8_t>((bits >> 16) & 0xff),
+                               static_cast<uint8_t>((bits >> 24) & 0xff)};
+      distance_output.write(reinterpret_cast<const char *>(bytes), 4);
+    }
+    if (!distance_output.good()) {
+      return false;
+    }
+    esdf_data["esdf_distance_file"] = stem.str() + "_esdf_distance.f32";
     const std::string data_json = esdf_data.dump();
     {
       std::ofstream output(esdf_data_path);
@@ -700,6 +815,9 @@ new ResizeObserver(resize).observe(c);resize();
   rclcpp::Subscription<tf2_msgs::msg::TFMessage>::SharedPtr tf_static_sub_;
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr height_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr esdf_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr
+      occupancy_3d_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mapping_status_pub_;
   rclcpp::TimerBase::SharedPtr publish_timer_;
 };
 

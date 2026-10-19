@@ -44,6 +44,16 @@ public:
     wipe_complete_topic_ = declare_parameter<std::string>(
         "observation.wipe_complete_topic", "/complex_area_plan/wipe_complete");
     map_frame_ = declare_parameter<std::string>("grid_map.frame_id", "map");
+    finish_on_complete_ = declare_parameter<bool>(
+        "observation.finish_on_complete", false);
+    const int max_stations = declare_parameter<int>(
+        "observation.max_stations_per_round", 5);
+    const int max_rounds = declare_parameter<int>(
+        "observation.max_rounds", 3);
+    max_stations_per_observation_ = static_cast<std::size_t>(
+        std::max(1, max_stations));
+    max_observation_rounds_ = static_cast<std::size_t>(
+        std::max(1, max_rounds));
     arrival_tolerance_ = declare_parameter<double>(
         "observation.arrival_tolerance", 0.15);
     tick_period_ms_ = declare_parameter<int>("observation.tick_period_ms", 100);
@@ -173,6 +183,9 @@ private:
       last_plan_ = ObservationPlan{};
       target_sent_ = false;
       saw_motion_ = false;
+      observation_round_ = 0;
+      stations_in_round_ = 0;
+      last_counted_position_index_ = std::numeric_limits<uint64_t>::max();
       active_ = true;
       phase_ = Phase::kWaitingForMap;
       publishState("waiting_for_station_commit");
@@ -188,6 +201,24 @@ private:
     const auto snapshot = map_.snapshot();
     if (!snapshot || !snapshot->task_mapping_active) return;
     const auto status = snapshot->mapping_status;
+    const std::string status_signature =
+        std::to_string(snapshot->version) + ":" +
+        std::to_string(status.position_index) + ":" +
+        std::to_string(static_cast<int>(status.motion_state)) + ":" +
+        std::to_string(status.stationary_frame_count) + ":" +
+        (status.ready_to_move ? "1" : "0");
+    if (status_signature != last_status_signature_) {
+      RCLCPP_INFO(get_logger(),
+                  "planner map: version=%lu position=%lu motion_state=%d "
+                  "stationary=%u/%u ready=%s esdf_current=%s",
+                  snapshot->version, status.position_index,
+                  static_cast<int>(status.motion_state),
+                  status.stationary_frame_count,
+                  status.stationary_frames_required,
+                  status.ready_to_move ? "true" : "false",
+                  snapshot->esdf_current ? "true" : "false");
+      last_status_signature_ = status_signature;
+    }
     if (target_sent_) {
       if (status.motion_state == MotionState::kMoving) saw_motion_ = true;
       const Eigen::Vector2d current(snapshot->motion_position.x(),
@@ -210,19 +241,54 @@ private:
 
     const Eigen::Vector2d current(snapshot->motion_position.x(),
                                   snapshot->motion_position.y());
+    if (status.position_index != last_counted_position_index_) {
+      last_counted_position_index_ = status.position_index;
+      ++stations_in_round_;
+      RCLCPP_INFO(get_logger(), "observation round %zu/%zu station %zu/%zu",
+                  observation_round_ + 1, max_observation_rounds_,
+                  stations_in_round_, max_stations_per_observation_);
+    }
     ObservationPlan next;
     if (!planner_.plan(*snapshot, current, visited_targets_, &next)) {
-      RCLCPP_DEBUG(get_logger(), "observation plan waiting: %s", next.reason.c_str());
-      return;
+      RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+                           "observation plan waiting: %s", next.reason.c_str());
+      if (stations_in_round_ < max_stations_per_observation_) return;
+      next.valid = true;
+      next.complete = next.metrics.wipeable_region_found;
+      next.reason = next.complete ? "station_limit_wipeable_region"
+                                  : "station_limit_below_wipe_threshold";
     }
+    RCLCPP_INFO(get_logger(),
+                "observation plan: valid=%s complete=%s reason=%s "
+                "unknown_ratio=%.3f opening=%s wipeable=%zu",
+                next.valid ? "true" : "false",
+                next.complete ? "true" : "false", next.reason.c_str(),
+                next.metrics.unknown_ratio,
+                next.metrics.opening_found ? "true" : "false",
+                next.wipeable_cells.size());
     last_plan_ = next;
     if (next.complete) {
       if (next.reason == "remaining_region_below_minimum") {
         phase_ = Phase::kDone;
-        publishState("done");
+        active_ = false;
+        publishState("observation_complete");
+        completion_timer_ = create_wall_timer(
+            std::chrono::milliseconds(1000), [] { rclcpp::shutdown(); });
         return;
       }
       beginWipe(*snapshot);
+      return;
+    }
+    if (stations_in_round_ >= max_stations_per_observation_) {
+      phase_ = Phase::kDone;
+      active_ = false;
+      publishState("observation_aborted_below_wipe_threshold");
+      RCLCPP_WARN(get_logger(),
+                  "observation stopped after %zu stations: wipeable region "
+                  "is below the configured minimum",
+                  stations_in_round_);
+      completion_timer_ = create_wall_timer(
+          std::chrono::milliseconds(1000), [] { rclcpp::shutdown(); });
       return;
     }
     if (next.target.visible_unknown == 0 && next.metrics.unknown_ratio >
@@ -263,13 +329,11 @@ private:
     command["unknown_ratio"] = last_plan_.metrics.unknown_ratio;
     command["opening_found"] = last_plan_.metrics.opening_found;
     command["wipeable_cells"] = last_plan_.wipeable_cells.size();
+    command["observation_round"] = observation_round_ + 1;
     command["theoretically_unobservable"] =
         last_plan_.metrics.theoretically_unobservable;
     command["points"] = Json::array();
-    const auto &polygon = snapshot.source_roi_polygon.size() >= 3
-                              ? snapshot.source_roi_polygon
-                              : snapshot.original_roi_polygon;
-    for (const auto &point : polygon) {
+    for (const auto &point : last_plan_.wipeable_cells) {
       command["points"].push_back({{"x", point.x()}, {"y", point.y()}});
     }
     std_msgs::msg::String message;
@@ -282,8 +346,20 @@ private:
     if (phase_ != Phase::kWiping) return;
     planner_.markWiped(last_plan_);
     map_.clearEsdfFreezing();
+    ++observation_round_;
+    if (observation_round_ >= max_observation_rounds_) {
+      phase_ = Phase::kDone;
+      active_ = false;
+      publishState("observation_complete");
+      completion_timer_ = create_wall_timer(
+          std::chrono::milliseconds(1000), [] { rclcpp::shutdown(); });
+      return;
+    }
     target_sent_ = false;
     saw_motion_ = false;
+    visited_targets_.clear();
+    stations_in_round_ = 0;
+    last_counted_position_index_ = std::numeric_limits<uint64_t>::max();
     phase_ = Phase::kWaitingForMap;
     publishState("assessing_remaining_region");
   }
@@ -304,6 +380,13 @@ private:
   bool target_sent_ = false;
   bool target_requires_motion_ = false;
   bool saw_motion_ = false;
+  bool finish_on_complete_ = false;
+  std::size_t max_stations_per_observation_ = 5;
+  std::size_t max_observation_rounds_ = 3;
+  std::size_t observation_round_ = 0;
+  std::size_t stations_in_round_ = 0;
+  uint64_t last_counted_position_index_ =
+      std::numeric_limits<uint64_t>::max();
   double arrival_tolerance_ = 0.15;
   int tick_period_ms_ = 100;
   std::string map_frame_ = "map";
@@ -313,12 +396,14 @@ private:
   std::string state_topic_;
   std::string wipe_topic_;
   std::string wipe_complete_topic_;
+  std::string last_status_signature_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr target_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr state_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr wipe_pub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr task_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr wipe_complete_sub_;
   rclcpp::TimerBase::SharedPtr tick_timer_;
+  rclcpp::TimerBase::SharedPtr completion_timer_;
 };
 
 }  // namespace

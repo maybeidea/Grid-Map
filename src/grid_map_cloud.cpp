@@ -159,6 +159,10 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node) {
   const double esdf_max_distance = declare_or_get_parameter<double>(
       node_, "grid_map.esdf_max_distance", 100000.0);
   esdf_config.max_distance = static_cast<float>(esdf_max_distance);
+  int esdf_change_voxels = static_cast<int>(esdf_recompute_change_voxels_);
+  parameter("grid_map.esdf_recompute_change_voxels", esdf_change_voxels);
+  esdf_recompute_change_voxels_ = static_cast<std::size_t>(std::max(
+      0, esdf_change_voxels));
   if (!configureEsdf(esdf_config)) {
     RCLCPP_WARN(node_->get_logger(),
                 "GridMap: invalid ESDF parameters; using defaults");
@@ -307,8 +311,11 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node) {
       motion_rotation_threshold_rad_ < 0.0f) {
     motion_rotation_threshold_rad_ = 0.02f;
   }
+  // Full-resolution depth frames are multi-megabyte fragmented DDS samples;
+  // reliable delivery prevents the best-effort sensor profile from dropping
+  // frames before the fusion queue sees them.
   cloud_sub_ = node_->create_subscription<sensor_msgs::msg::PointCloud2>(
-      cloud_topic_, rclcpp::SensorDataQoS(),
+      cloud_topic_, rclcpp::QoS(10).reliable(),
       [this](const sensor_msgs::msg::PointCloud2::ConstSharedPtr cloud) {
         pointCloudCallback(cloud);
       });
@@ -466,13 +473,40 @@ bool GridMap::processPointCloudFrame(
       }
       return false;
     }
-    if (!esdf_volume_.compute(occupancy_voxels_, occupancy_model_)) {
-      if (node_) {
-        RCLCPP_ERROR_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
-                              "GridMap failed to compute ESDF after global "
-                              "map fusion");
+    std::size_t changed_voxels = occupancy_voxels_.size();
+    if (esdf_initialized_ &&
+        last_esdf_occupancy_states_.size() == occupancy_voxels_.size()) {
+      changed_voxels = 0;
+      for (std::size_t i = 0; i < occupancy_voxels_.size(); ++i) {
+        if (occupancy_model_.state(occupancy_voxels_[i]) !=
+            last_esdf_occupancy_states_[i]) {
+          ++changed_voxels;
+        }
       }
-      return false;
+    }
+    const bool recompute_esdf =
+        !esdf_initialized_ || esdf_recompute_change_voxels_ == 0 ||
+        changed_voxels >= esdf_recompute_change_voxels_;
+    if (recompute_esdf) {
+      if (!esdf_volume_.compute(occupancy_voxels_, occupancy_model_)) {
+        if (node_) {
+          RCLCPP_ERROR_THROTTLE(
+              node_->get_logger(), *node_->get_clock(), 5000,
+              "GridMap failed to compute ESDF after global map fusion");
+        }
+        return false;
+      }
+      last_esdf_occupancy_states_.resize(occupancy_voxels_.size());
+      for (std::size_t i = 0; i < occupancy_voxels_.size(); ++i) {
+        last_esdf_occupancy_states_[i] =
+            occupancy_model_.state(occupancy_voxels_[i]);
+      }
+      esdf_initialized_ = true;
+    } else if (node_) {
+      RCLCPP_DEBUG(node_->get_logger(),
+                   "Reusing high-resolution ESDF: changed_voxels=%zu "
+                   "threshold=%zu",
+                   changed_voxels, esdf_recompute_change_voxels_);
     }
   }
   {

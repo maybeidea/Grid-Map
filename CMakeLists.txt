@@ -184,6 +184,11 @@ install(TARGETS plan_env
 )
 install(TARGETS grid_map_standalone_test DESTINATION lib/${PROJECT_NAME})
 
+install(PROGRAMS scripts/gemini336_depth_scene.py
+                scripts/gemini336_mapping_evaluator.py
+  DESTINATION lib/${PROJECT_NAME})
+install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
+
 add_executable(observation_planner_node src/observation_planner_node.cpp)
 target_link_libraries(observation_planner_node plan_env nlohmann_json::nlohmann_json usb-1.0)
 if(COMMAND ament_target_dependencies)

@@ -82,6 +82,9 @@ struct EsdfSnapshot {
   std::vector<float> occupancy_probabilities;
   std::vector<OccupancyState> occupancy_states;
   std::vector<EsdfVoxel> esdf_voxels;
+  // False when a small occupancy change intentionally reused the previous
+  // high-resolution ESDF. Occupancy and low-resolution layers are current.
+  bool esdf_current = true;
   Eigen::Vector3f camera_position = Eigen::Vector3f::Zero();
   // Pose used by the motion gate (normally base_footprint), in map frame.
   Eigen::Vector3f motion_position = Eigen::Vector3f::Zero();
@@ -388,6 +391,9 @@ private:
   bool local_map_cross_position_ = false;
   bool global_map_dirty_ = false;
   bool low_map_dirty_ = false;
+  std::size_t esdf_recompute_change_voxels_ = 128;
+  std::vector<OccupancyState> last_esdf_occupancy_states_;
+  bool esdf_initialized_ = false;
 
   mutable std::mutex motion_mutex_;
   MotionState motion_state_ = MotionState::kWaitingForPose;
