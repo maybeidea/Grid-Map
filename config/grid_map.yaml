@@ -1,0 +1,15 @@
+# Minimal mapping configuration. Distances are metres, angles are radians.
+/**:
+  ros__parameters:
+    grid_map.cloud_topic: /camera/depth/points
+    grid_map.frame_id: map
+    grid_map.motion_frame: base_footprint
+    # Fine task window / coarse expanded surroundings.
+    grid_map.high_resolution: 0.01
+    grid_map.low_resolution: 0.03
+    grid_map.map_size_z: 0.20
+    grid_map.expansion_margin: 0.25
+    # Larger leaves reduce point count and ray traversal cost.
+    grid_map.point_cloud_leaf_size: 0.005
+    # Successful fused frames required before committing this station.
+    grid_map.stationary_frames: 30

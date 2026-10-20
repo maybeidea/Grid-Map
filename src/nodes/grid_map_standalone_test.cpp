@@ -161,8 +161,8 @@ public:
     cloud_topic_ = declare_parameter<std::string>("grid_map.cloud_topic",
                                                   "/camera/depth/points");
     record_bag_ = declare_parameter<bool>("record_bag", true);
-    bag_directory_ = declare_parameter<std::string>("bag_directory",
-                                                     PLAN_ENV_BAG_DIR);
+    bag_directory_ =
+        declare_parameter<std::string>("bag_directory", PLAN_ENV_BAG_DIR);
     tf_topic_ = declare_parameter<std::string>("tf_topic", "/tf");
     tf_static_topic_ =
         declare_parameter<std::string>("tf_static_topic", "/tf_static");
@@ -184,11 +184,14 @@ public:
         [this](const std_msgs::msg::String::ConstSharedPtr message) {
           onTask(message->data);
         });
-    // Full-resolution stride=1 frames can contain hundreds of thousands of
-    // points. Use reliable delivery so large fragmented samples are not
-    // silently dropped by a best-effort sensor QoS profile.
+    auto cloud_qos = rclcpp::QoS(10);
+    if (declare_parameter<bool>("grid_map.cloud_reliable", true)) {
+      cloud_qos.reliable();
+    } else {
+      cloud_qos.best_effort();
+    }
     cloud_monitor_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-        cloud_topic_, rclcpp::QoS(10).reliable(),
+        cloud_topic_, cloud_qos,
         [this](const sensor_msgs::msg::PointCloud2::ConstSharedPtr message) {
           ++cloud_messages_total_;
           ++cloud_messages_for_task_;
@@ -291,9 +294,8 @@ private:
       const auto status = map_->mappingStatus();
       RCLCPP_INFO(get_logger(),
                   "%s; waiting for cloud fusion (cloud=%s, "
-                  "stationary_frames_min=%u, stationary_frames=%u)",
+                  "stationary_frames=%u)",
                   message.c_str(), cloud_topic_.c_str(),
-                  status.stationary_frames_min,
                   status.stationary_frames_required);
     } catch (const std::exception &error) {
       RCLCPP_WARN(get_logger(), "task rejected: %s", error.what());
@@ -312,8 +314,7 @@ private:
         mapping_status.stationary_frame_count;
     status_json["stationary_frames_required"] =
         mapping_status.stationary_frames_required;
-    status_json["motion_state"] =
-        motionStateName(mapping_status.motion_state);
+    status_json["motion_state"] = motionStateName(mapping_status.motion_state);
     std_msgs::msg::String status_message;
     status_message.data = status_json.dump();
     mapping_status_pub_->publish(status_message);
@@ -483,9 +484,8 @@ private:
     std::lock_guard<std::mutex> lock(bag_mutex_);
     try {
       const rclcpp::Time message_time(stamp);
-      bag_writer_->write(message, topic, message_time.nanoseconds() > 0
-                                        ? message_time
-                                        : now());
+      bag_writer_->write(message, topic,
+                         message_time.nanoseconds() > 0 ? message_time : now());
     } catch (const std::exception &error) {
       RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 5000,
                             "failed to write bag message on %s: %s",
@@ -493,8 +493,8 @@ private:
     }
   }
 
-  static builtin_interfaces::msg::Time
-  tfMessageStamp(const tf2_msgs::msg::TFMessage &message) {
+  static builtin_interfaces::msg::Time tfMessageStamp(
+      const tf2_msgs::msg::TFMessage &message) {
     builtin_interfaces::msg::Time stamp;
     for (const auto &transform : message.transforms) {
       if (transform.header.stamp.sec > stamp.sec ||
@@ -515,9 +515,10 @@ private:
                    bag_directory_.c_str());
       return;
     }
-    const auto timestamp = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                               std::chrono::system_clock::now().time_since_epoch())
-                               .count();
+    const auto timestamp =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count();
     bag_uri_ = bag_directory_ + "/grid_map_" + std::to_string(timestamp);
     try {
       rosbag2_storage::StorageOptions storage_options;
@@ -533,8 +534,8 @@ private:
                   bag_uri_.c_str());
     } catch (const std::exception &error) {
       bag_writer_.reset();
-      RCLCPP_ERROR(get_logger(), "cannot open rosbag at %s: %s", bag_uri_.c_str(),
-                   error.what());
+      RCLCPP_ERROR(get_logger(), "cannot open rosbag at %s: %s",
+                   bag_uri_.c_str(), error.what());
     }
   }
 
@@ -767,10 +768,10 @@ new ResizeObserver(resize).observe(c);resize();
       RCLCPP_WARN(get_logger(),
                   "no PointCloud2 received for active task: topic=%s "
                   "total_cloud_messages=%lu; map topics are waiting for "
-                  "cloud fusion (stationary_frames_min=%u)",
+                  "cloud fusion (stationary_frames_required=%u)",
                   cloud_topic_.c_str(),
                   static_cast<unsigned long>(cloud_messages_total_),
-                  status.stationary_frames_min);
+                  status.stationary_frames_required);
       return;
     }
     RCLCPP_WARN(get_logger(),
@@ -782,7 +783,8 @@ new ResizeObserver(resize).observe(c);resize();
                 static_cast<unsigned long>(cloud_messages_total_),
                 last_cloud_frame_.c_str(),
                 static_cast<unsigned long>(last_cloud_point_count_),
-                status.stationary_frame_count, status.stationary_frames_min,
+                status.stationary_frame_count,
+                status.stationary_frames_required,
                 motionStateName(status.motion_state),
                 static_cast<unsigned long>(snapshot_version),
                 snapshot && snapshot->task_mapping_active ? "true" : "false");
@@ -815,8 +817,7 @@ new ResizeObserver(resize).observe(c);resize();
   rclcpp::Subscription<tf2_msgs::msg::TFMessage>::SharedPtr tf_static_sub_;
   rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr height_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr esdf_pub_;
-  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr
-      occupancy_3d_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr occupancy_3d_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mapping_status_pub_;
   rclcpp::TimerBase::SharedPtr publish_timer_;
 };

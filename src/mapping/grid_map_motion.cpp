@@ -1,28 +1,24 @@
 #include "plan_env/grid_map.hpp"
 
+#include <algorithm>
 #include <cmath>
 
 namespace plan_env {
 
 bool GridMap::configureMotion(const float translation_threshold,
                               const float rotation_threshold_rad,
-                              const uint32_t stationary_frames,
-                              const uint32_t stationary_frames_min) {
+                              const uint32_t stationary_frames) {
   if (!std::isfinite(translation_threshold) || translation_threshold < 0.0f ||
       !std::isfinite(rotation_threshold_rad) || rotation_threshold_rad < 0.0f ||
-      stationary_frames == 0 || stationary_frames_min > stationary_frames) {
+      stationary_frames == 0) {
     return false;
   }
-  const uint32_t minimum = stationary_frames_min == 0
-                               ? stationary_frames
-                               : stationary_frames_min;
   std::lock_guard<std::recursive_mutex> state_lock(task_region_mutex_);
   {
     std::lock_guard<std::mutex> lock(motion_mutex_);
     motion_translation_threshold_ = translation_threshold;
     motion_rotation_threshold_rad_ = rotation_threshold_rad;
     stationary_frames_required_ = stationary_frames;
-    stationary_frames_min_ = minimum;
   }
   resetMotionState();
   return true;
@@ -35,7 +31,6 @@ MappingStatus GridMap::mappingStatus() const {
   status.motion_state = motion_state_;
   status.last_fusion_mode = last_fusion_mode_;
   status.stationary_frame_count = stationary_frame_count_;
-  status.stationary_frames_min = stationary_frames_min_;
   status.stationary_frames_required = stationary_frames_required_;
   status.position_index = position_index_;
   status.same_position_fused_frames = same_position_fused_frames_;
@@ -55,7 +50,6 @@ bool GridMap::readyToMove() const {
 void GridMap::resetMotionState() {
   {
     std::lock_guard<std::mutex> lock(motion_mutex_);
-    station_pose_correction_.setIdentity();
     motion_state_ = MotionState::kWaitingForPose;
     last_fusion_mode_ = FusionMode::kSamePosition;
     last_motion_position_.setZero();
@@ -64,7 +58,6 @@ void GridMap::resetMotionState() {
     stationary_anchor_orientation_ = Eigen::Quaternionf::Identity();
     has_last_motion_pose_ = false;
     has_stationary_anchor_ = false;
-    awaiting_new_position_ = false;
     local_map_cross_position_ = false;
     stationary_frame_count_ = 0;
     position_index_ = 0;
@@ -75,9 +68,8 @@ void GridMap::resetMotionState() {
   clearLocalMap();
 }
 
-bool GridMap::updateMotionState(const PreparedCloud &prepared,
-                                FusionMode *mode) {
-  if (!mode || !prepared.motion_position.allFinite() ||
+bool GridMap::updateMotionState(const PreparedCloud &prepared) {
+  if (!prepared.motion_position.allFinite() ||
       !prepared.motion_orientation.coeffs().allFinite()) {
     return false;
   }
@@ -116,7 +108,6 @@ bool GridMap::updateMotionState(const PreparedCloud &prepared,
       anchor_rotation_delta > motion_rotation_threshold_rad_) {
     motion_state_ = MotionState::kMoving;
     stationary_frame_count_ = 0;
-    awaiting_new_position_ = true;
     global_map_ready_for_current_position_ = false;
     clearLocalMap();
     // The old anchor has served its purpose (detecting cumulative drift).
@@ -130,13 +121,11 @@ bool GridMap::updateMotionState(const PreparedCloud &prepared,
     return false;
   }
 
-  const bool new_position = !has_stationary_anchor_ || awaiting_new_position_;
+  const bool new_position = !has_stationary_anchor_;
   if (new_position) {
-    station_pose_correction_.setIdentity();
     stationary_anchor_position_ = prepared.motion_position;
     stationary_anchor_orientation_ = prepared.motion_orientation;
     has_stationary_anchor_ = true;
-    awaiting_new_position_ = false;
     stationary_frame_count_ = 0;
     local_map_cross_position_ = global_map_initialized_;
     global_map_ready_for_current_position_ = false;
@@ -145,31 +134,18 @@ bool GridMap::updateMotionState(const PreparedCloud &prepared,
   // Every accepted frame first enters the current-position local map. The
   // different-position mode is recorded only after that local map is
   // recalibrated and committed to the global map.
-  *mode = FusionMode::kSamePosition;
 
   // The quota is advanced only after the map integrator confirms that this
   // cloud was actually fused. This function only admits the candidate frame.
   motion_state_ = MotionState::kStationaryCollecting;
-  last_fusion_mode_ = *mode;
+  last_fusion_mode_ = FusionMode::kSamePosition;
   return true;
 }
 
-bool GridMap::recordSuccessfulFusion() {
+void GridMap::recordSuccessfulFusion() {
   std::lock_guard<std::mutex> lock(motion_mutex_);
-  ++stationary_frame_count_;
-  if (stationary_frame_count_ >= stationary_frames_required_) {
-    stationary_frame_count_ = stationary_frames_required_;
-    // The local quota is complete. processPointCloudFrame still has to
-    // recalibrate and commit the local map before the station is ready.
-    return true;
-  }
-  motion_state_ = MotionState::kStationaryCollecting;
-  return true;
-}
-
-bool GridMap::hasMinimumStationaryFrames() const {
-  std::lock_guard<std::mutex> lock(motion_mutex_);
-  return stationary_frame_count_ >= stationary_frames_min_;
+  stationary_frame_count_ =
+      std::min(stationary_frame_count_ + 1, stationary_frames_required_);
 }
 
 }  // namespace plan_env

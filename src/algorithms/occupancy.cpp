@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <limits>
 
 namespace plan_env {
 
@@ -45,16 +44,6 @@ const LogOddsConfig &LogOddsModel::config() const {
 }
 
 void LogOddsModel::update(OccupancyVoxel &voxel, const bool hit) const {
-  if (hit) {
-    voxel.hit_count = static_cast<uint16_t>(
-        std::min<uint32_t>(std::numeric_limits<uint16_t>::max(),
-                           static_cast<uint32_t>(voxel.hit_count) + 1));
-  } else {
-    voxel.miss_count = static_cast<uint16_t>(
-        std::min<uint32_t>(std::numeric_limits<uint16_t>::max(),
-                           static_cast<uint32_t>(voxel.miss_count) + 1));
-  }
-
   const float increment = hit ? config_.hit_log_odds : config_.miss_log_odds;
   if (!std::isfinite(voxel.log_odds)) {
     voxel.log_odds = 0.0f;

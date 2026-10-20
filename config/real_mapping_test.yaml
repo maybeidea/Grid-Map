@@ -1,0 +1,45 @@
+# External camera + localization/TF + active Nav2 are required.
+/**:
+  ros__parameters:
+    use_sim_time: false
+    grid_map.frame_id: map
+    grid_map.motion_frame: base_footprint
+    grid_map.cloud_topic: /camera/depth/points
+    # Best-effort subscribers match both best-effort and reliable cameras.
+    grid_map.cloud_reliable: false
+    grid_map.map_size_z: 1.8
+    grid_map.high_resolution: 0.02
+    grid_map.low_resolution: 0.04
+    grid_map.expansion_margin: 0.8
+    grid_map.point_cloud_leaf_size: 0.02
+    grid_map.stationary_frames: 30
+    grid_map.motion_translation_threshold: 0.03
+    grid_map.motion_rotation_threshold_rad: 0.02
+    grid_map.registration.enabled: true
+
+grid_map_standalone_test:
+  ros__parameters:
+    task_topic: /area_designation
+    heightmap_topic: /grid_map/heightmap
+    esdf_topic: /grid_map/esdf_slice
+    occupancy_3d_topic: /grid_map/occupied_voxels
+    visualization_dir: /tmp/plan_env_real
+    record_bag: true
+    bag_directory: /tmp/plan_env_real/bag
+    # Only the planner publishes the optional bimax height message.
+    grid_map.height_map_enable: false
+
+plan_env_observation_planner:
+  ros__parameters:
+    observation.task_topic: /area_designation
+    observation.target_topic: /complex_area_plan/observation_target
+    observation.state_topic: /complex_area_plan/observation_state
+    observation.wipe_topic: /complex_area_plan/wipe_request
+    observation.wipe_complete_topic: /complex_area_plan/wipe_complete
+    observation.navigation_enabled: true
+    observation.exit_on_complete: false
+    observation.max_stations_per_round: 5
+    observation.max_rounds: 3
+    navigate_action: /navigate_to_pose
+    action_server_timeout: 5.0
+    nav_timeout: 120.0

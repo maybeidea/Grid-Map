@@ -15,6 +15,12 @@ bool pointInGrid(const Eigen::Vector3f &grid_origin, float resolution,
                  const Eigen::Vector3i &grid_size,
                  const Eigen::Vector3f &point);
 
+// Constant-time admission check with the same clipping rules as traverseRay.
+bool intersectsGrid(const Eigen::Vector3f &grid_origin, float resolution,
+                    const Eigen::Vector3i &grid_size,
+                    const Eigen::Vector3f &ray_origin,
+                    const Eigen::Vector3f &ray_end);
+
 // Walk a camera-to-point segment once. The callback receives each traversed
 // voxel in order; hit is true only for the endpoint voxel when the endpoint is
 // inside the map. No ray or voxel list is retained by this module.

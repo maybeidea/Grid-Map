@@ -1,4 +1,6 @@
 #include "plan_env/observation_planner.hpp"
+#include "plan_env/grid_map.hpp"
+#include "nav2_navigation.hpp"
 
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <nlohmann/json.hpp>
@@ -29,12 +31,11 @@ geometry_msgs::msg::Quaternion quaternionFromYaw(const double yaw) {
 class ObservationPlannerNode final : public rclcpp::Node {
 public:
   ObservationPlannerNode()
-      : Node("plan_env_observation_planner"),
-        planner_(readConfig()) {
-    task_topic_ = declare_parameter<std::string>(
-        "observation.task_topic", "/area_designation");
-    cloud_topic_ = declare_parameter<std::string>(
-        "grid_map.cloud_topic", "/camera/depth/points");
+      : Node("plan_env_observation_planner"), planner_(readConfig()) {
+    task_topic_ = declare_parameter<std::string>("observation.task_topic",
+                                                 "/area_designation");
+    declare_parameter<std::string>("grid_map.cloud_topic",
+                                   "/camera/depth/points");
     target_topic_ = declare_parameter<std::string>(
         "observation.target_topic", "/complex_area_plan/observation_target");
     state_topic_ = declare_parameter<std::string>(
@@ -44,19 +45,28 @@ public:
     wipe_complete_topic_ = declare_parameter<std::string>(
         "observation.wipe_complete_topic", "/complex_area_plan/wipe_complete");
     map_frame_ = declare_parameter<std::string>("grid_map.frame_id", "map");
-    finish_on_complete_ = declare_parameter<bool>(
-        "observation.finish_on_complete", false);
-    const int max_stations = declare_parameter<int>(
-        "observation.max_stations_per_round", 5);
-    const int max_rounds = declare_parameter<int>(
-        "observation.max_rounds", 3);
-    max_stations_per_observation_ = static_cast<std::size_t>(
-        std::max(1, max_stations));
-    max_observation_rounds_ = static_cast<std::size_t>(
-        std::max(1, max_rounds));
-    arrival_tolerance_ = declare_parameter<double>(
-        "observation.arrival_tolerance", 0.15);
+    const int max_stations =
+        declare_parameter<int>("observation.max_stations_per_round", 5);
+    const int max_rounds = declare_parameter<int>("observation.max_rounds", 3);
+    max_stations_per_observation_ =
+        static_cast<std::size_t>(std::max(1, max_stations));
+    max_observation_rounds_ = static_cast<std::size_t>(std::max(1, max_rounds));
+    arrival_tolerance_ =
+        declare_parameter<double>("observation.arrival_tolerance", 0.15);
     tick_period_ms_ = declare_parameter<int>("observation.tick_period_ms", 100);
+    exit_on_complete_ =
+        declare_parameter<bool>("observation.exit_on_complete", false);
+    const bool navigate =
+        declare_parameter<bool>("observation.navigation_enabled", false);
+    const auto action =
+        declare_parameter<std::string>("navigate_action", "/navigate_to_pose");
+    const double server_timeout =
+        declare_parameter<double>("action_server_timeout", 5.0);
+    const double nav_timeout = declare_parameter<double>("nav_timeout", 120.0);
+    if (navigate) {
+      navigation_ = std::make_unique<Nav2Navigation>(
+          this, action, server_timeout, nav_timeout);
+    }
 
     target_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>(
         target_topic_, rclcpp::QoS(1).reliable().transient_local());
@@ -72,7 +82,9 @@ public:
     wipe_complete_sub_ = create_subscription<std_msgs::msg::Bool>(
         wipe_complete_topic_, 10,
         [this](const std_msgs::msg::Bool::ConstSharedPtr msg) {
-          if (msg->data) handleWipeComplete();
+          if (msg->data) {
+            handleWipeComplete();
+          }
         });
     tick_timer_ = create_wall_timer(
         std::chrono::milliseconds(std::max(20, tick_period_ms_)),
@@ -89,18 +101,18 @@ private:
 
   ObservationPlannerConfig readConfig() {
     ObservationPlannerConfig config;
-    config.wipe_z_min = declare_parameter<double>(
-        "observation.wipe_z_min", config.wipe_z_min);
-    config.wipe_z_max = declare_parameter<double>(
-        "observation.wipe_z_max", config.wipe_z_max);
-    config.arm_reach = declare_parameter<double>(
-        "observation.arm_reach", config.arm_reach);
+    config.wipe_z_min =
+        declare_parameter<double>("observation.wipe_z_min", config.wipe_z_min);
+    config.wipe_z_max =
+        declare_parameter<double>("observation.wipe_z_max", config.wipe_z_max);
+    config.arm_reach =
+        declare_parameter<double>("observation.arm_reach", config.arm_reach);
     config.arm_entry_depth = declare_parameter<double>(
         "observation.arm_entry_depth", config.arm_entry_depth);
     config.opening_width = declare_parameter<double>(
         "observation.opening_width", config.opening_width);
-    config.sensor_range = declare_parameter<double>(
-        "observation.sensor_range", config.sensor_range);
+    config.sensor_range = declare_parameter<double>("observation.sensor_range",
+                                                    config.sensor_range);
     config.sensor_half_fov = declare_parameter<double>(
         "observation.sensor_half_fov", config.sensor_half_fov);
     config.candidate_spacing = declare_parameter<double>(
@@ -111,20 +123,19 @@ private:
         "observation.min_wipeable_cells", config.min_wipeable_cells);
     config.max_unknown_ratio = declare_parameter<double>(
         "observation.max_unknown_ratio", config.max_unknown_ratio);
-    config.min_unknown_gain = declare_parameter<double>(
-        "observation.min_unknown_gain", config.min_unknown_gain);
     config.travel_penalty = declare_parameter<double>(
         "observation.travel_penalty", config.travel_penalty);
     const int max_candidates = declare_parameter<int>(
         "observation.max_candidates", static_cast<int>(config.max_candidates));
-    config.max_candidates = static_cast<std::size_t>(std::max(1, max_candidates));
+    config.max_candidates =
+        static_cast<std::size_t>(std::max(1, max_candidates));
     return config;
   }
 
   static std::vector<Eigen::Vector2d> parsePolygon(const Json &payload,
                                                    std::string *frame) {
     Json points;
-    std::string task_frame = frame ? *frame : "map";
+    std::string task_frame = payload.value("frame_id", frame ? *frame : "map");
     if (payload.value("type", "") == "polygon" &&
         payload.value("function", "") == "clean") {
       const auto &data = payload.at("data");
@@ -139,7 +150,9 @@ private:
     } else {
       throw std::runtime_error("unsupported observation task format");
     }
-    if (frame) *frame = task_frame;
+    if (frame) {
+      *frame = task_frame;
+    }
     if (!points.is_array() || points.size() < 3 || points.size() > 1000) {
       throw std::runtime_error("observation task needs 3..1000 points");
     }
@@ -161,6 +174,7 @@ private:
       const Json payload = Json::parse(raw);
       if (payload.value("status", 1) == -1 ||
           payload.value("command", "") == "stop") {
+        resetNavigation();
         map_.stopTaskMapping();
         active_ = false;
         phase_ = Phase::kIdle;
@@ -170,15 +184,16 @@ private:
       std::string frame = map_frame_;
       const auto polygon = parsePolygon(payload, &frame);
       if (frame != map_frame_) {
-        throw std::runtime_error("task frame_id does not match grid_map.frame_id");
+        throw std::runtime_error(
+            "task frame_id does not match grid_map.frame_id");
       }
       std::string message;
       if (!map_.startTaskMapping(polygon, &message)) {
         throw std::runtime_error(message.empty() ? "startTaskMapping failed"
                                                  : message);
       }
+      resetNavigation();
       planner_.reset();
-      polygon_ = polygon;
       visited_targets_.clear();
       last_plan_ = ObservationPlan{};
       target_sent_ = false;
@@ -189,7 +204,8 @@ private:
       active_ = true;
       phase_ = Phase::kWaitingForMap;
       publishState("waiting_for_station_commit");
-      RCLCPP_INFO(get_logger(), "observation task accepted: %s", message.c_str());
+      RCLCPP_INFO(get_logger(), "observation task accepted: %s",
+                  message.c_str());
     } catch (const std::exception &error) {
       RCLCPP_WARN(get_logger(), "observation task rejected: %s", error.what());
       publishState(std::string("rejected:") + error.what());
@@ -197,9 +213,27 @@ private:
   }
 
   void tick() {
-    if (!active_ || phase_ == Phase::kWiping || phase_ == Phase::kDone) return;
+    if (!active_ || phase_ == Phase::kWiping || phase_ == Phase::kDone) {
+      return;
+    }
+    if (navigation_ && target_sent_) {
+      navigation_->tick();
+      if (navigation_->state() == Nav2Navigation::State::Failed) {
+        const auto reason = navigation_->error();
+        active_ = false;
+        target_sent_ = false;
+        phase_ = Phase::kDone;
+        map_.stopTaskMapping();
+        publishState("navigation_failed:" + reason);
+        RCLCPP_ERROR(get_logger(), "observation navigation failed: %s",
+                     reason.c_str());
+        return;
+      }
+    }
     const auto snapshot = map_.snapshot();
-    if (!snapshot || !snapshot->task_mapping_active) return;
+    if (!snapshot || !snapshot->task_mapping_active) {
+      return;
+    }
     const auto status = snapshot->mapping_status;
     const std::string status_signature =
         std::to_string(snapshot->version) + ":" +
@@ -220,13 +254,18 @@ private:
       last_status_signature_ = status_signature;
     }
     if (target_sent_) {
-      if (status.motion_state == MotionState::kMoving) saw_motion_ = true;
+      if (status.motion_state == MotionState::kMoving) {
+        saw_motion_ = true;
+      }
       const Eigen::Vector2d current(snapshot->motion_position.x(),
                                     snapshot->motion_position.y());
       const double distance = (current - last_plan_.target.xy).norm();
+      const bool movement_complete =
+          navigation_
+              ? navigation_->state() == Nav2Navigation::State::Succeeded
+              : (saw_motion_ || !target_requires_motion_);
       const bool reached = status.ready_to_move &&
-                           distance <= arrival_tolerance_ &&
-                           (saw_motion_ || !target_requires_motion_);
+                           distance <= arrival_tolerance_ && movement_complete;
       if (reached) {
         visited_targets_.push_back(last_plan_.target.xy);
         target_sent_ = false;
@@ -236,8 +275,10 @@ private:
       }
       return;
     }
-    if (!status.ready_to_move || status.motion_state != MotionState::kReadyToMove)
+    if (!status.ready_to_move ||
+        status.motion_state != MotionState::kReadyToMove) {
       return;
+    }
 
     const Eigen::Vector2d current(snapshot->motion_position.x(),
                                   snapshot->motion_position.y());
@@ -252,7 +293,9 @@ private:
     if (!planner_.plan(*snapshot, current, visited_targets_, &next)) {
       RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
                            "observation plan waiting: %s", next.reason.c_str());
-      if (stations_in_round_ < max_stations_per_observation_) return;
+      if (stations_in_round_ < max_stations_per_observation_) {
+        return;
+      }
       next.valid = true;
       next.complete = next.metrics.wipeable_region_found;
       next.reason = next.complete ? "station_limit_wipeable_region"
@@ -261,9 +304,8 @@ private:
     RCLCPP_INFO(get_logger(),
                 "observation plan: valid=%s complete=%s reason=%s "
                 "unknown_ratio=%.3f opening=%s wipeable=%zu",
-                next.valid ? "true" : "false",
-                next.complete ? "true" : "false", next.reason.c_str(),
-                next.metrics.unknown_ratio,
+                next.valid ? "true" : "false", next.complete ? "true" : "false",
+                next.reason.c_str(), next.metrics.unknown_ratio,
                 next.metrics.opening_found ? "true" : "false",
                 next.wipeable_cells.size());
     last_plan_ = next;
@@ -272,8 +314,7 @@ private:
         phase_ = Phase::kDone;
         active_ = false;
         publishState("observation_complete");
-        completion_timer_ = create_wall_timer(
-            std::chrono::milliseconds(1000), [] { rclcpp::shutdown(); });
+        scheduleCompletion();
         return;
       }
       beginWipe(*snapshot);
@@ -287,12 +328,11 @@ private:
                   "observation stopped after %zu stations: wipeable region "
                   "is below the configured minimum",
                   stations_in_round_);
-      completion_timer_ = create_wall_timer(
-          std::chrono::milliseconds(1000), [] { rclcpp::shutdown(); });
+      scheduleCompletion();
       return;
     }
-    if (next.target.visible_unknown == 0 && next.metrics.unknown_ratio >
-                                             planner_.config().max_unknown_ratio) {
+    if (next.target.visible_unknown == 0 &&
+        next.metrics.unknown_ratio > planner_.config().max_unknown_ratio) {
       RCLCPP_WARN(get_logger(), "no candidate can reduce unknown area (%s)",
                   next.reason.c_str());
       return;
@@ -312,11 +352,15 @@ private:
     phase_ = Phase::kMoving;
     saw_motion_ = false;
     const auto snapshot = map_.snapshot();
-    const Eigen::Vector2d current(snapshot ? snapshot->motion_position.x() : 0.0,
-                                  snapshot ? snapshot->motion_position.y() : 0.0);
+    const Eigen::Vector2d current(
+        snapshot ? snapshot->motion_position.x() : 0.0,
+        snapshot ? snapshot->motion_position.y() : 0.0);
     target_requires_motion_ = (target.xy - current).norm() > arrival_tolerance_;
     publishState(target_requires_motion_ ? "moving_to_observation"
                                          : "observing_current_station");
+    if (navigation_) {
+      navigation_->start(message);
+    }
   }
 
   void beginWipe(const EsdfSnapshot &snapshot) {
@@ -343,7 +387,9 @@ private:
   }
 
   void handleWipeComplete() {
-    if (phase_ != Phase::kWiping) return;
+    if (phase_ != Phase::kWiping) {
+      return;
+    }
     planner_.markWiped(last_plan_);
     map_.clearEsdfFreezing();
     ++observation_round_;
@@ -351,8 +397,7 @@ private:
       phase_ = Phase::kDone;
       active_ = false;
       publishState("observation_complete");
-      completion_timer_ = create_wall_timer(
-          std::chrono::milliseconds(1000), [] { rclcpp::shutdown(); });
+      scheduleCompletion();
       return;
     }
     target_sent_ = false;
@@ -370,9 +415,26 @@ private:
     state_pub_->publish(message);
   }
 
+  void resetNavigation() {
+    if (navigation_) {
+      navigation_->cancel();
+    }
+    if (completion_timer_) {
+      completion_timer_->cancel();
+      completion_timer_.reset();
+    }
+    target_sent_ = false;
+  }
+
+  void scheduleCompletion() {
+    if (exit_on_complete_) {
+      completion_timer_ = create_wall_timer(std::chrono::milliseconds(1000),
+                                            [] { rclcpp::shutdown(); });
+    }
+  }
+
   GridMap map_;
   ObservationPlanner planner_;
-  std::vector<Eigen::Vector2d> polygon_;
   std::vector<Eigen::Vector2d> visited_targets_;
   ObservationPlan last_plan_;
   Phase phase_ = Phase::kIdle;
@@ -380,18 +442,17 @@ private:
   bool target_sent_ = false;
   bool target_requires_motion_ = false;
   bool saw_motion_ = false;
-  bool finish_on_complete_ = false;
+  bool exit_on_complete_ = false;
+  std::unique_ptr<Nav2Navigation> navigation_;
   std::size_t max_stations_per_observation_ = 5;
   std::size_t max_observation_rounds_ = 3;
   std::size_t observation_round_ = 0;
   std::size_t stations_in_round_ = 0;
-  uint64_t last_counted_position_index_ =
-      std::numeric_limits<uint64_t>::max();
+  uint64_t last_counted_position_index_ = std::numeric_limits<uint64_t>::max();
   double arrival_tolerance_ = 0.15;
   int tick_period_ms_ = 100;
   std::string map_frame_ = "map";
   std::string task_topic_;
-  std::string cloud_topic_;
   std::string target_topic_;
   std::string state_topic_;
   std::string wipe_topic_;
@@ -417,4 +478,3 @@ int main(int argc, char **argv) {
   rclcpp::shutdown();
   return 0;
 }
-

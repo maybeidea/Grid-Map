@@ -1,7 +1,7 @@
 #pragma once
 
 #include "plan_env/occupancy.hpp"
-#include "plan_env/tsdf.hpp"
+#include "plan_env/grid_geometry.hpp"
 
 #include <cstddef>
 #include <limits>

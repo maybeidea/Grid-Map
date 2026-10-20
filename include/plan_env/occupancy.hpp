@@ -1,15 +1,11 @@
 #pragma once
 
-#include <cstdint>
-
 namespace plan_env {
 
 // A log-odds voxel is intentionally a small value type so snapshots can be
 // copied without depending on the fusion implementation.
 struct OccupancyVoxel {
   float log_odds = 0.0f;
-  uint16_t hit_count = 0;
-  uint16_t miss_count = 0;
 };
 
 enum class OccupancyState { FREE, OCCUPIED, UNKNOWN };

@@ -16,105 +16,98 @@ bool validGeometry(const GridGeometry &geometry) {
          geometry.size_x > 0 && geometry.size_y > 0 && geometry.size_z > 0;
 }
 
+// One scratch set per OpenMP worker, reused across all lines and axes.
+struct LineWorkspace {
+  explicit LineWorkspace(int capacity)
+      : input(capacity), output(capacity), envelope(capacity),
+        boundaries(capacity + 1) {}
+  std::vector<float> input;
+  std::vector<float> output;
+  std::vector<int> envelope;
+  std::vector<float> boundaries;
+};
+
 // Felzenszwalb and Huttenlocher's exact 1D squared distance transform.
-void transformLine(const std::vector<float> &input,
-                   std::vector<float> *output) {
-  const int n = static_cast<int>(input.size());
-  output->assign(input.size(), kInfinity);
-  if (n == 0) {
-    return;
-  }
-  std::vector<int> envelope(static_cast<std::size_t>(n));
-  std::vector<float> boundaries(static_cast<std::size_t>(n) + 1, 0.0f);
-  int envelope_size = -1;
+void transformLine(LineWorkspace &line, const int n) {
+  std::fill_n(line.output.begin(), n, kInfinity);
+  int last = -1;
   for (int q = 0; q < n; ++q) {
-    if (!std::isfinite(input[q])) {
+    if (!std::isfinite(line.input[q])) {
       continue;
     }
-    if (envelope_size < 0) {
-      envelope_size = 0;
-      envelope[0] = q;
-      boundaries[0] = -kInfinity;
-      boundaries[1] = kInfinity;
-      continue;
-    }
-    float intersection = 0.0f;
-    do {
-      const int v = envelope[envelope_size];
-      intersection = ((input[q] + static_cast<float>(q) * q) -
-                      (input[v] + static_cast<float>(v) * v)) /
+    float intersection = -kInfinity;
+    while (last >= 0) {
+      const int v = line.envelope[last];
+      intersection = ((line.input[q] + static_cast<float>(q) * q) -
+                      (line.input[v] + static_cast<float>(v) * v)) /
                      (2.0f * static_cast<float>(q - v));
-      if (intersection <= boundaries[envelope_size]) {
-        --envelope_size;
+      if (intersection > line.boundaries[last]) {
+        break;
       }
-    } while (envelope_size >= 0 && intersection <= boundaries[envelope_size]);
-    ++envelope_size;
-    envelope[envelope_size] = q;
-    boundaries[envelope_size] = intersection;
-    boundaries[envelope_size + 1] = kInfinity;
+      --last;
+    }
+    ++last;
+    line.envelope[last] = q;
+    line.boundaries[last] = last == 0 ? -kInfinity : intersection;
+    line.boundaries[last + 1] = kInfinity;
   }
-  if (envelope_size < 0) {
+  if (last < 0) {
     return;
   }
   int k = 0;
   for (int q = 0; q < n; ++q) {
-    while (boundaries[k + 1] < static_cast<float>(q)) {
+    while (line.boundaries[k + 1] < static_cast<float>(q)) {
       ++k;
     }
-    const float delta = static_cast<float>(q - envelope[k]);
-    (*output)[static_cast<std::size_t>(q)] = delta * delta + input[envelope[k]];
+    const float delta = static_cast<float>(q - line.envelope[k]);
+    line.output[q] = delta * delta + line.input[line.envelope[k]];
   }
 }
 
 void transformVolume(std::vector<float> *distance, int sx, int sy, int sz) {
   const auto address = [sy, sz](int x, int y, int z) {
-    return static_cast<std::size_t>(x * sy * sz + y * sz + z);
+    return (static_cast<std::size_t>(x) * sy + y) * sz + z;
   };
-#pragma omp parallel for schedule(static)
-  for (int y = 0; y < sy; ++y) {
-    for (int z = 0; z < sz; ++z) {
-      std::vector<float> input;
-      std::vector<float> output;
-      input.reserve(static_cast<std::size_t>(sx));
-      output.reserve(static_cast<std::size_t>(sx));
-      for (int x = 0; x < sx; ++x) {
-        input.push_back((*distance)[address(x, y, z)]);
-      }
-      transformLine(input, &output);
-      for (int x = 0; x < sx; ++x) {
-        (*distance)[address(x, y, z)] = output[x];
-      }
-    }
-  }
-#pragma omp parallel for schedule(static)
-  for (int x = 0; x < sx; ++x) {
-    for (int z = 0; z < sz; ++z) {
-      std::vector<float> input;
-      std::vector<float> output;
-      input.reserve(static_cast<std::size_t>(sy));
-      output.reserve(static_cast<std::size_t>(sy));
-      for (int y = 0; y < sy; ++y) {
-        input.push_back((*distance)[address(x, y, z)]);
-      }
-      transformLine(input, &output);
-      for (int y = 0; y < sy; ++y) {
-        (*distance)[address(x, y, z)] = output[y];
-      }
-    }
-  }
-#pragma omp parallel for schedule(static)
-  for (int x = 0; x < sx; ++x) {
+  const int capacity = std::max({sx, sy, sz});
+  // Small maps run serially to avoid team startup costs. Axis barriers are
+  // required because each pass consumes the complete preceding pass.
+#pragma omp parallel if (distance->size() >= 32768)
+  {
+    LineWorkspace line(capacity);
+#pragma omp for collapse(2) schedule(static)
     for (int y = 0; y < sy; ++y) {
-      std::vector<float> input;
-      std::vector<float> output;
-      input.reserve(static_cast<std::size_t>(sz));
-      output.reserve(static_cast<std::size_t>(sz));
       for (int z = 0; z < sz; ++z) {
-        input.push_back((*distance)[address(x, y, z)]);
+        for (int x = 0; x < sx; ++x) {
+          line.input[x] = (*distance)[address(x, y, z)];
+        }
+        transformLine(line, sx);
+        for (int x = 0; x < sx; ++x) {
+          (*distance)[address(x, y, z)] = line.output[x];
+        }
       }
-      transformLine(input, &output);
+    }
+#pragma omp for collapse(2) schedule(static)
+    for (int x = 0; x < sx; ++x) {
       for (int z = 0; z < sz; ++z) {
-        (*distance)[address(x, y, z)] = output[z];
+        for (int y = 0; y < sy; ++y) {
+          line.input[y] = (*distance)[address(x, y, z)];
+        }
+        transformLine(line, sy);
+        for (int y = 0; y < sy; ++y) {
+          (*distance)[address(x, y, z)] = line.output[y];
+        }
+      }
+    }
+#pragma omp for collapse(2) schedule(static)
+    for (int x = 0; x < sx; ++x) {
+      for (int y = 0; y < sy; ++y) {
+        for (int z = 0; z < sz; ++z) {
+          line.input[z] = (*distance)[address(x, y, z)];
+        }
+        transformLine(line, sz);
+        for (int z = 0; z < sz; ++z) {
+          (*distance)[address(x, y, z)] = line.output[z];
+        }
       }
     }
   }
@@ -126,7 +119,8 @@ bool EsdfVolume::configure(const GridGeometry &geometry,
                            const EsdfConfig &config) {
   if (!validGeometry(geometry) || !std::isfinite(config.max_distance) ||
       config.max_distance < 0.0f || std::isnan(config.unknown_z_min) ||
-      std::isnan(config.unknown_z_max) || config.unknown_z_min > config.unknown_z_max) {
+      std::isnan(config.unknown_z_max) ||
+      config.unknown_z_min > config.unknown_z_max) {
     return false;
   }
   geometry_ = geometry;
@@ -170,9 +164,11 @@ bool EsdfVolume::compute(const std::vector<OccupancyVoxel> &occupancy,
   const int sz = geometry_.size_z;
   const std::size_t count = voxels_.size();
   const double z_min = std::floor(
-      (static_cast<double>(config_.unknown_z_min) - geometry_.origin.z()) / geometry_.resolution);
+      (static_cast<double>(config_.unknown_z_min) - geometry_.origin.z()) /
+      geometry_.resolution);
   const double z_max = std::floor(
-      (static_cast<double>(config_.unknown_z_max) - geometry_.origin.z()) / geometry_.resolution);
+      (static_cast<double>(config_.unknown_z_max) - geometry_.origin.z()) /
+      geometry_.resolution);
   const auto is_source = [&](std::size_t i) {
     const auto state = model.state(occupancy[i]);
     const int z = static_cast<int>(i % static_cast<std::size_t>(sz));

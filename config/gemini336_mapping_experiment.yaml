@@ -1,6 +1,21 @@
-# Gemini 336 mapping experiment parameters.
-# The launch file only loads this file; edit these values instead of adding
-# per-node parameter dictionaries to the launch description.
+# Shared mapping settings for both map-owning nodes.
+/**:
+  ros__parameters:
+    grid_map.frame_id: map
+    grid_map.motion_frame: gemini336_depth_optical_frame
+    grid_map.cloud_topic: /camera/depth/points
+    grid_map.cloud_reliable: true
+    grid_map.map_size_z: 1.8
+    grid_map.high_resolution: 0.02
+    grid_map.low_resolution: 0.04
+    grid_map.expansion_margin: 0.8
+    grid_map.point_cloud_leaf_size: 0.02
+    grid_map.cloud_low_z_clear_rays: true
+    grid_map.stationary_frames: 2
+    grid_map.motion_translation_threshold: 0.03
+    grid_map.motion_rotation_threshold_rad: 0.02
+    grid_map.registration.enabled: false
+    grid_map.esdf_recompute_change_voxels: 128
 
 gemini336_depth_scene:
   ros__parameters:
@@ -29,48 +44,20 @@ grid_map_standalone_test:
     occupancy_3d_topic: /grid_map/occupied_voxels
     visualization_dir: /tmp/plan_env_gemini336
     record_bag: false
-    grid_map.frame_id: map
-    grid_map.motion_frame: gemini336_depth_optical_frame
-    grid_map.cloud_topic: /camera/depth/points
-    grid_map.map_size_z: 1.8
-    grid_map.high_resolution: 0.02
-    grid_map.low_resolution: 0.04
-    grid_map.expansion_margin: 0.8
-    grid_map.cloud_leaf_size: 0.02
-    grid_map.cloud_low_z_clear_rays: true
-    grid_map.stationary_frames_min: 1
-    grid_map.stationary_frames: 2
-    grid_map.motion_translation_threshold: 0.03
-    grid_map.motion_rotation_threshold_rad: 0.02
-    grid_map.registration.enabled: false
-    grid_map.esdf_recompute_change_voxels: 128
+    grid_map.height_map_enable: false
     grid_map.height_band_z_max: 2.0
 
 plan_env_observation_planner:
   ros__parameters:
     observation.task_topic: /area_designation
-    grid_map.cloud_topic: /camera/depth/points
     observation.target_topic: /complex_area_plan/observation_target
     observation.state_topic: /complex_area_plan/observation_state
     observation.wipe_topic: /complex_area_plan/wipe_request
     observation.wipe_complete_topic: /complex_area_plan/wipe_complete
-    grid_map.frame_id: map
-    grid_map.motion_frame: gemini336_depth_optical_frame
-    grid_map.map_size_z: 1.8
-    grid_map.high_resolution: 0.02
-    grid_map.low_resolution: 0.04
-    grid_map.expansion_margin: 0.8
-    grid_map.cloud_leaf_size: 0.02
-    grid_map.cloud_low_z_clear_rays: true
-    grid_map.stationary_frames_min: 1
-    grid_map.stationary_frames: 2
-    grid_map.motion_translation_threshold: 0.03
-    grid_map.motion_rotation_threshold_rad: 0.02
-    grid_map.registration.enabled: false
-    grid_map.esdf_recompute_change_voxels: 128
     observation.max_stations_per_round: 5
     observation.max_rounds: 3
-    observation.finish_on_complete: true
+    observation.navigation_enabled: false
+    observation.exit_on_complete: true
 
 gemini336_mapping_evaluator:
   ros__parameters:

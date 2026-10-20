@@ -67,6 +67,21 @@ bool pointInGrid(const Eigen::Vector3f &grid_origin, const float resolution,
          (point.array() < max_corner.array()).all();
 }
 
+bool intersectsGrid(const Eigen::Vector3f &grid_origin, float resolution,
+                    const Eigen::Vector3i &grid_size,
+                    const Eigen::Vector3f &ray_origin,
+                    const Eigen::Vector3f &ray_end) {
+  if (!validGrid(resolution, grid_size) || !ray_origin.allFinite() ||
+      !ray_end.allFinite()) {
+    return false;
+  }
+  const Eigen::Vector3f max_corner =
+      grid_origin + resolution * grid_size.cast<float>();
+  float t_min, t_max;
+  return clipSegment(grid_origin, max_corner, ray_origin, ray_end, &t_min,
+                     &t_max);
+}
+
 bool traverseRay(const Eigen::Vector3f &grid_origin, const float resolution,
                  const Eigen::Vector3i &grid_size,
                  const Eigen::Vector3f &ray_origin,

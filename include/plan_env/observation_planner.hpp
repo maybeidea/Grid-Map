@@ -1,6 +1,6 @@
 #pragma once
 
-#include "plan_env/grid_map.hpp"
+#include "plan_env/map_snapshot.hpp"
 
 #include <Eigen/Core>
 
@@ -17,7 +17,6 @@ struct ObservationTarget {
   double yaw = 0.0;
   double score = 0.0;
   std::size_t visible_unknown = 0;
-  std::size_t visible_opening = 0;
   std::size_t visible_wipeable = 0;
 };
 
@@ -62,13 +61,12 @@ struct ObservationPlannerConfig {
   // below this value.  An unobservable remainder can be accepted only when
   // no candidate can see it.
   double max_unknown_ratio = 0.18;
-  double min_unknown_gain = 0.03;
   double travel_penalty = 0.08;
   std::size_t max_candidates = 64;
 };
 
 /**
- * Stateless planner over one immutable GridMap snapshot.
+ * Planner over one immutable snapshot, retaining only previously wiped cells.
  *
  * The planner deliberately uses the original high-resolution map.  The
  * expanded low-resolution map remains available to Nav2 and collision checks,
@@ -94,4 +92,3 @@ private:
 };
 
 }  // namespace plan_env
-

@@ -6,6 +6,7 @@ import json
 
 import numpy as np
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from geometry_msgs.msg import Point, PoseStamped, TransformStamped
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -130,7 +131,8 @@ class Gemini336DepthScene(Node):
         points = ','.join('{"x":%.3f,"y":%.3f}' % point
                           for point in self.map_polygon)
         message = String()
-        message.data = '{"command":"start","frame_id":"map","points":[%s]}' % points
+        message.data = '{"command":"start","frame_id":%s,"points":[%s]}' % (
+            json.dumps(self.map_frame), points)
         self.task_pub.publish(message)
         self.task_sent = True
 
@@ -406,9 +408,12 @@ def main():
     node = Gemini336DepthScene()
     try:
         rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

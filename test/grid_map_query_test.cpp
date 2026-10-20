@@ -21,7 +21,9 @@ struct GridMapTestAccess {
       const std::vector<Eigen::Vector3f> &points) {
     auto msg = std::make_shared<sensor_msgs::msg::PointCloud2>();
     pcl::PointCloud<pcl::PointXYZ> pcl_cloud;
-    for (const auto &p : points) pcl_cloud.emplace_back(p.x(), p.y(), p.z());
+    for (const auto &p : points) {
+      pcl_cloud.emplace_back(p.x(), p.y(), p.z());
+    }
     pcl::toROSMsg(pcl_cloud, *msg);
     msg->header.frame_id = "map";
     return msg;
@@ -39,7 +41,8 @@ struct GridMapTestAccess {
   }
 
   static bool frame(GridMap &map, float x = 0.0f, float yaw = 0.0f,
-                    const std::vector<Eigen::Vector3f> &points = {{0.625f, 0.125f, 0.375f}}) {
+                    const std::vector<Eigen::Vector3f> &points = {
+                        {0.625f, 0.125f, 0.375f}}) {
     std::lock_guard<std::recursive_mutex> lock(map.task_region_mutex_);
     static std::atomic<int> seconds{1};
     const auto stamp = rclcpp::Time(seconds.fetch_add(1), 0, RCL_ROS_TIME);
@@ -76,7 +79,8 @@ protected:
   }
 
   bool frame(float x = 0.0f, float yaw = 0.0f,
-             const std::vector<Eigen::Vector3f> &points = {{0.625f, 0.125f, 0.375f}}) {
+             const std::vector<Eigen::Vector3f> &points = {
+                 {0.625f, 0.125f, 0.375f}}) {
     return GridMapTestAccess::frame(*map_, x, yaw, points);
   }
 
@@ -85,7 +89,7 @@ protected:
 
 TEST_F(GridMapQueryTest, resolutionIsAvailableBeforeStartAndAfterStop) {
   GridMap other;
-  EXPECT_NEAR(0.05, other.getResolution(), 1e-7);
+  EXPECT_NEAR(0.01, other.getResolution(), 1e-7);
   ASSERT_TRUE(other.configure(0.125f, 1.0f));
   EXPECT_DOUBLE_EQ(0.125, other.getResolution());
   ASSERT_TRUE(other.startTaskMapping({{0, 0}, {1, 0}, {0, 1}}));
@@ -155,7 +159,8 @@ TEST_F(GridMapQueryTest, preciseDistanceInterpolatesVoxelCenters) {
       }
     }
   }
-  EXPECT_DOUBLE_EQ(expected, map_->getPreciseDistance(Eigen::Vector3d(0.5, 0.0, 0.25)));
+  EXPECT_DOUBLE_EQ(expected,
+                   map_->getPreciseDistance(Eigen::Vector3d(0.5, 0.0, 0.25)));
 }
 
 TEST_F(GridMapQueryTest, translationAndRotationResumeAtThreeSuccessiveStops) {
@@ -192,7 +197,7 @@ TEST_F(GridMapQueryTest, translationAndRotationResumeAtThreeSuccessiveStops) {
 }
 
 TEST_F(GridMapQueryTest, localMapCommitsOnlyAfterStationaryQuota) {
-  ASSERT_TRUE(map_->configureMotion(0.03f, 0.02f, 5, 2));
+  ASSERT_TRUE(map_->configureMotion(0.03f, 0.02f, 5));
   EXPECT_FALSE(frame());
   EXPECT_FALSE(frame());
   EXPECT_EQ(1u, map_->mappingStatus().stationary_frame_count);
@@ -240,18 +245,23 @@ TEST_F(GridMapQueryTest, failedRegistrationCannotBecomeSamePositionFusion) {
   cfg.max_correspondence_distance = 0.01f;
   ASSERT_TRUE(map_->configureRegistration(cfg));
   start();
-  const std::vector<Eigen::Vector3f> first{{0.6f, 0.1f, 0.3f}, {0.7f, 0.2f, 0.4f},
-                                         {0.5f, 0.3f, 0.6f}, {0.8f, 0.4f, 0.5f}};
+  const std::vector<Eigen::Vector3f> first{{0.6f, 0.1f, 0.3f},
+                                           {0.7f, 0.2f, 0.4f},
+                                           {0.5f, 0.3f, 0.6f},
+                                           {0.8f, 0.4f, 0.5f}};
   EXPECT_FALSE(frame(0, 0, first));
   ASSERT_TRUE(frame(0, 0, first));
   const auto version = map_->snapshot()->version;
   EXPECT_FALSE(frame(0.5f, 0, first));
-  const std::vector<Eigen::Vector3f> far{{-0.6f, -0.6f, 0.3f}, {-0.7f, -0.5f, 0.4f},
-                                       {-0.5f, -0.4f, 0.6f}, {-0.8f, -0.3f, 0.5f}};
+  const std::vector<Eigen::Vector3f> far{{-0.6f, -0.6f, 0.3f},
+                                         {-0.7f, -0.5f, 0.4f},
+                                         {-0.5f, -0.4f, 0.6f},
+                                         {-0.8f, -0.3f, 0.5f}};
   for (int i = 0; i < 3; ++i) {
     EXPECT_FALSE(frame(0.5f, 0, far));
     EXPECT_EQ(0u, map_->mappingStatus().stationary_frame_count);
-    EXPECT_EQ(FusionMode::kDifferentPosition, map_->mappingStatus().last_fusion_mode);
+    EXPECT_EQ(FusionMode::kDifferentPosition,
+              map_->mappingStatus().last_fusion_mode);
     EXPECT_EQ(version, map_->snapshot()->version);
   }
   ASSERT_TRUE(frame(0.5f, 0, first));  // valid overlap retries and recovers
@@ -266,17 +276,22 @@ TEST_F(GridMapQueryTest, acceptedRegistrationIsRetainedForTheRestOfTheStop) {
   ASSERT_TRUE(map_->configureRegistration(cfg));
   ASSERT_TRUE(map_->configureMotion(0.03f, 0.02f, 2));
   start();
-  const std::vector<Eigen::Vector3f> reference{{0.6f, 0.1f, 0.3f}, {0.7f, 0.2f, 0.4f},
-                                            {0.5f, 0.3f, 0.6f}, {0.8f, 0.4f, 0.5f}};
+  const std::vector<Eigen::Vector3f> reference{{0.6f, 0.1f, 0.3f},
+                                               {0.7f, 0.2f, 0.4f},
+                                               {0.5f, 0.3f, 0.6f},
+                                               {0.8f, 0.4f, 0.5f}};
   EXPECT_FALSE(frame(0, 0, reference));
   EXPECT_FALSE(frame(0, 0, reference));
   ASSERT_TRUE(frame(0, 0, reference));
   auto shifted = reference;
-  for (auto &p : shifted) p.x() += 0.05f;
+  for (auto &p : shifted) {
+    p.x() += 0.05f;
+  }
   EXPECT_FALSE(frame(0.5f, 0, shifted));
   EXPECT_FALSE(frame(0.5f, 0, shifted));  // first accepted cross-position frame
   EXPECT_EQ(1u, map_->mappingStatus().stationary_frame_count);
-  ASSERT_TRUE(frame(0.5f, 0, shifted));   // same-position frame must retain correction
+  ASSERT_TRUE(
+      frame(0.5f, 0, shifted));  // same-position frame must retain correction
   EXPECT_NEAR(-0.05f, map_->snapshot()->camera_position.x(), 1e-3f);
   EXPECT_EQ(1u, map_->mappingStatus().different_position_fused_frames);
 }
@@ -322,24 +337,26 @@ TEST_F(GridMapQueryTest, legacyGroundFilterDropsOrClearsWithoutCreatingHit) {
   for (bool clear : {false, true}) {
     map_->stopTaskMapping();
     rclcpp::NodeOptions options;
-    options.append_parameter_override("grid_map.resolution", 0.25);
+    options.append_parameter_override("grid_map.high_resolution", 0.25);
     options.append_parameter_override("grid_map.map_size_z", 1.0);
     options.append_parameter_override("grid_map.cloud_min_map_z", 0.2);
     options.append_parameter_override("grid_map.cloud_low_z_clear_rays", clear);
     options.append_parameter_override("grid_map.stationary_frames", 1);
-    auto node = std::make_shared<rclcpp::Node>(clear ? "ground_clear" : "ground_drop", options);
+    auto node = std::make_shared<rclcpp::Node>(
+        clear ? "ground_clear" : "ground_drop", options);
     map_->initMap(node);
     start();
     EXPECT_FALSE(frame(0, 0, {{0.625f, 0.125f, 0.1f}}));
     EXPECT_EQ(clear, frame(0, 0, {{0.625f, 0.125f, 0.1f}}));
-    EXPECT_EQ(clear ? 0 : -1, map_->getOccupancy(Eigen::Vector3d(0.625, 0.125, 0.1)));
+    EXPECT_EQ(clear ? 0 : -1,
+              map_->getOccupancy(Eigen::Vector3d(0.625, 0.125, 0.1)));
     EXPECT_EQ(clear ? 1u : 0u, map_->mappingStatus().stationary_frame_count);
   }
 }
 
 TEST_F(GridMapQueryTest, emptyOccupiedVolumeStillPublishesValidSnapshot) {
   rclcpp::NodeOptions options;
-  options.append_parameter_override("grid_map.resolution", 0.25);
+  options.append_parameter_override("grid_map.high_resolution", 0.25);
   options.append_parameter_override("grid_map.map_size_z", 1.0);
   options.append_parameter_override("grid_map.cloud_min_map_z", 0.2);
   options.append_parameter_override("grid_map.cloud_low_z_clear_rays", true);
@@ -390,7 +407,7 @@ TEST_F(GridMapQueryTest, legacyUnknownModeParametersSelectOffTaskBandAndAll) {
   for (const std::string mode : {"off", "task_roi", "all"}) {
     map_->stopTaskMapping();
     rclcpp::NodeOptions options;
-    options.append_parameter_override("grid_map.resolution", 0.25);
+    options.append_parameter_override("grid_map.high_resolution", 0.25);
     options.append_parameter_override("grid_map.map_size_z", 1.0);
     options.append_parameter_override("grid_map.esdf_unknown_mode", mode);
     options.append_parameter_override("grid_map.ground_height", 0.25);
@@ -445,6 +462,69 @@ TEST_F(GridMapQueryTest, queuedCloudsAndTaskSwitchesAreSerialized) {
   EXPECT_FALSE(map_->hasEsdfFreezing());
   EXPECT_FALSE(map_->isMappingReadyForPlanning());
   EXPECT_TRUE(map_->snapshot()->esdf_voxels.empty());
+}
+
+TEST_F(GridMapQueryTest, ExpandedLayerPublishesWhenHighLayerHasNoPoints) {
+  map_->stopTaskMapping();
+  ASSERT_TRUE(map_->configureDualResolution(0.25f, 0.25f, 1.0f, 0.5f));
+  start();
+  const std::vector<Eigen::Vector3f> points{{1.125f, 0.125f, 0.375f}};
+  EXPECT_FALSE(frame(0, 0, points));
+  const auto first = map_->snapshot();
+  EXPECT_FALSE(frame(0, 0, points));
+  const auto second = map_->snapshot();
+  EXPECT_NE(first, second);
+  EXPECT_EQ(first->version, second->version);
+  EXPECT_EQ(1, map_->getOccupancy(Eigen::Vector3d(1.125, 0.125, 0.375)));
+  EXPECT_FALSE(map_->readyToMove());
+}
+
+TEST_F(GridMapQueryTest, ReusedEsdfIsMarkedStaleUntilRecomputed) {
+  EXPECT_FALSE(frame());
+  ASSERT_TRUE(frame());
+  ASSERT_TRUE(map_->snapshot()->esdf_current);
+  const std::vector<Eigen::Vector3f> points{{0.125f, 0.625f, 0.375f}};
+  EXPECT_FALSE(frame(0.5f, 0, points));
+  ASSERT_TRUE(frame(0.5f, 0, points));
+  EXPECT_FALSE(map_->snapshot()->esdf_current);
+  EXPECT_EQ(1, map_->getOccupancy(Eigen::Vector3d(0.125, 0.625, 0.375)));
+}
+
+TEST_F(GridMapQueryTest,
+       CanonicalParametersOverrideDefaultsWithoutLegacyAliases) {
+  map_->stopTaskMapping();
+  rclcpp::NodeOptions options;
+  options.append_parameter_override("grid_map.high_resolution", 0.125);
+  options.append_parameter_override("grid_map.low_resolution", 0.25);
+  options.append_parameter_override("grid_map.point_cloud_leaf_size", 0.02);
+  options.append_parameter_override("grid_map.resolution", 0.5);
+  auto node = std::make_shared<rclcpp::Node>("canonical_parameters", options);
+  map_->initMap(node);
+  EXPECT_DOUBLE_EQ(0.125, map_->getResolution());
+  EXPECT_FALSE(node->has_parameter("grid_map.resolution"));
+  EXPECT_FALSE(node->has_parameter("grid_map.expansion_ratio"));
+  EXPECT_FALSE(node->has_parameter("grid_map.stationary_frames_min"));
+  EXPECT_FALSE(node->has_parameter("grid_map.cloud_leaf_size"));
+  EXPECT_DOUBLE_EQ(
+      0.02, node->get_parameter("grid_map.point_cloud_leaf_size").as_double());
+}
+
+TEST_F(GridMapQueryTest, TsdfRemainsInvisibleUntilStationEvidenceCommits) {
+  map_->stopTaskMapping();
+  ASSERT_TRUE(map_->configureTsdf(true, 0.25f));
+  ASSERT_TRUE(map_->configureMotion(0.03f, 0.02f, 2));
+  start();
+  EXPECT_FALSE(frame());
+  EXPECT_FALSE(frame());
+  for (const auto &voxel : map_->snapshot()->tsdf_voxels) {
+    EXPECT_EQ(0.0f, voxel.weight);
+  }
+  ASSERT_TRUE(frame());
+  bool has_surface = false;
+  for (const auto &voxel : map_->snapshot()->tsdf_voxels) {
+    has_surface |= voxel.weight > 0;
+  }
+  EXPECT_TRUE(has_surface);
 }
 
 }  // namespace
