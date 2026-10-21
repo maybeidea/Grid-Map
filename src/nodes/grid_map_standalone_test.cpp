@@ -1,5 +1,6 @@
 #include "plan_env/grid_map.hpp"
 #include "plan_env/height_map.hpp"
+#include "standalone_visualization.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -559,22 +560,22 @@ private:
             static_cast<size_t>(image_height - 1 - y) * width + x;
         switch (height.data[source]) {
         case 0:
-          setPixel(height_rgb, target, 65, 180, 95);
+          setPixel(height_rgb, target, 47, 158, 68);
           break;
         case 25:
-          setPixel(height_rgb, target, 105, 190, 220);
+          setPixel(height_rgb, target, 116, 192, 252);
           break;
         case 50:
-          setPixel(height_rgb, target, 235, 205, 70);
+          setPixel(height_rgb, target, 255, 212, 59);
           break;
         case 75:
-          setPixel(height_rgb, target, 235, 130, 55);
+          setPixel(height_rgb, target, 240, 62, 62);
           break;
         case 100:
-          setPixel(height_rgb, target, 205, 65, 65);
+          setPixel(height_rgb, target, 166, 30, 77);
           break;
         default:
-          setPixel(height_rgb, target, 55, 60, 65);
+          setPixel(height_rgb, target, 151, 117, 250);
           break;
         }
       }
@@ -606,6 +607,16 @@ private:
     esdf_data["dimensions"] = {geometry.size_x, geometry.size_y,
                                geometry.size_z};
     esdf_data["layout"] = "x-major, then y, then z";
+    esdf_data["esdf_current"] = snapshot.esdf_current;
+    esdf_data["heightmap"] = height.data;
+    esdf_data["heightmap_layout"] = "row-major: y * width + x";
+    esdf_data["roi"] = Json::array();
+    const auto &roi = snapshot.source_roi_polygon.size() >= 3
+                          ? snapshot.source_roi_polygon
+                          : snapshot.original_roi_polygon;
+    for (const auto &point : roi) {
+      esdf_data["roi"].push_back({point.x(), point.y()});
+    }
     esdf_data["occupancy_semantics"] =
         "1=occupied (distance<=0), 0=free (distance>0), null=unknown";
     esdf_data["occupancy_state_semantics"] =
@@ -684,46 +695,7 @@ private:
                      esdf_html_path.c_str());
         return false;
       }
-      output << R"HTML(<!doctype html>
-<html lang="en">
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ESDF 3D</title>
-<style>
-html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#101619;color:#e7eeee;font:14px system-ui,sans-serif}
-canvas{display:block;width:100%;height:100%;cursor:grab;touch-action:none}canvas:active{cursor:grabbing}
-#info{position:fixed;left:16px;top:14px;padding:10px 12px;background:#202a2e;border:1px solid #46565b;border-radius:4px;line-height:1.5;pointer-events:none}
-#legend{position:fixed;right:16px;bottom:14px;padding:9px 12px;background:#202a2e;border:1px solid #46565b;border-radius:4px}
-</style>
-<canvas id="view"></canvas><div id="info"></div><div id="legend">occupied: red &nbsp; free: omitted</div>
-<script id="data" type="application/json">)HTML"
-             << data_json << R"HTML(</script>
-<script>
-const d=JSON.parse(document.getElementById('data').textContent), c=document.getElementById('view'),ctx=c.getContext('2d');
-const [nx,ny,nz]=d.dimensions,[ox,oy,oz]=d.origin,step=d.resolution;
-const points=[];
-for(let x=0;x<nx;x++)for(let y=0;y<ny;y++)for(let z=0;z<nz;z++){
- const v=d.occupancy[(x*ny+y)*nz+z];if(v!==1)continue;
- points.push([ox+(x+.5)*step,oy+(y+.5)*step,oz+(z+.5)*step]);
-}
-const bounds=[[Infinity,-Infinity],[Infinity,-Infinity],[Infinity,-Infinity]];
-for(const p of points)for(let k=0;k<3;k++){bounds[k][0]=Math.min(bounds[k][0],p[k]);bounds[k][1]=Math.max(bounds[k][1],p[k])}
-if(points.length===0)for(let k=0;k<3;k++)bounds[k]=[0,step];
-const center=bounds.map(b=>(b[0]+b[1])/2),span=Math.max(...bounds.map(b=>b[1]-b[0]),step),info=document.getElementById('info');
-info.textContent=`Occupancy version ${d.version} · ${d.frame_id} · ${nx} × ${ny} × ${nz} voxels · ${points.length} occupied · ${step} m`;
-let yaw=-.65,pitch=.45,zoom=1,drag=null;
-function resize(){const r=devicePixelRatio||1;c.width=Math.round(c.clientWidth*r);c.height=Math.round(c.clientHeight*r);draw()}
-function draw(){const w=c.width,h=c.height;if(!w||!h)return;ctx.setTransform(1,0,0,1,0,0);ctx.fillStyle='#101619';ctx.fillRect(0,0,w,h);const s=Math.min(w,h)*.82/span*zoom,cy=Math.cos(yaw),sy=Math.sin(yaw),cp=Math.cos(pitch),sp=Math.sin(pitch);const projected=[];
- for(const p of points){const x=p[0]-center[0],y=p[1]-center[1],z=p[2]-center[2],rx=cy*x-sy*y,ry=sy*x+cy*y,py=cp*z-sp*ry,depth=sp*z+cp*ry;projected.push([w/2+rx*s,h/2-py*s,depth])}
- projected.sort((a,b)=>a[2]-b[2]);ctx.globalAlpha=.82;
- for(const p of projected){ctx.fillStyle='rgb(220,65,65)';ctx.fillRect(p[0],p[1],Math.max(1.5,s*step*.72),Math.max(1.5,s*step*.72))}ctx.globalAlpha=1}
-c.addEventListener('pointerdown',e=>{drag=[e.clientX,e.clientY];c.setPointerCapture(e.pointerId)});
-c.addEventListener('pointermove',e=>{if(!drag)return;yaw+=(e.clientX-drag[0])*.008;pitch=Math.max(-1.5,Math.min(1.5,pitch+(e.clientY-drag[1])*.008));drag=[e.clientX,e.clientY];draw()});
-c.addEventListener('pointerup',()=>drag=null);c.addEventListener('pointercancel',()=>drag=null);
-c.addEventListener('wheel',e=>{e.preventDefault();zoom=Math.max(.1,Math.min(20,zoom*Math.exp(-e.deltaY*.001)));draw()},{passive:false});
-new ResizeObserver(resize).observe(c);resize();
-</script></html>
-)HTML";
+      writeStandaloneVisualization(output, data_json);
       if (!output.good()) {
         return false;
       }
