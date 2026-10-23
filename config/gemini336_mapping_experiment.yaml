@@ -4,7 +4,6 @@
     grid_map.frame_id: map
     grid_map.motion_frame: gemini336_depth_optical_frame
     grid_map.cloud_topic: /camera/depth/points
-    grid_map.cloud_reliable: true
     grid_map.map_size_z: 1.8
     grid_map.high_resolution: 0.02
     grid_map.low_resolution: 0.04
@@ -44,7 +43,6 @@ grid_map_standalone_test:
     occupancy_3d_topic: /grid_map/occupied_voxels
     visualization_dir: /tmp/plan_env_gemini336
     record_bag: false
-    grid_map.height_map_enable: false
     grid_map.height_band_z_max: 2.0
 
 plan_env_observation_planner:
@@ -56,8 +54,6 @@ plan_env_observation_planner:
     observation.wipe_complete_topic: /complex_area_plan/wipe_complete
     observation.max_stations_per_round: 5
     observation.max_rounds: 3
-    observation.navigation_enabled: false
-    observation.exit_on_complete: true
 
 gemini336_mapping_evaluator:
   ros__parameters:

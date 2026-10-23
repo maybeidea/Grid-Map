@@ -183,7 +183,7 @@ bool GridMap::updateHighResolutionEsdf() {
                               changed_voxels >= esdf_recompute_change_voxels_;
   esdf_current_ = recompute_esdf || changed_voxels == 0;
   if (recompute_esdf) {
-    if (!esdf_volume_.compute(occupancy_voxels_, occupancy_model_)) {
+    if (!esdf_volume_.computeIfChanged(occupancy_voxels_, occupancy_model_)) {
       if (node_) {
         RCLCPP_ERROR_THROTTLE(
             node_->get_logger(), *node_->get_clock(), 5000,

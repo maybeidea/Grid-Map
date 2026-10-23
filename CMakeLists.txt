@@ -26,7 +26,7 @@ find_package(Threads REQUIRED)
 find_package(nlohmann_json REQUIRED)
 find_package(bimax_msgs QUIET)
 foreach(dependency builtin_interfaces geometry_msgs nav_msgs pcl_conversions
-                   nav2_msgs rclcpp rclcpp_action rosbag2_cpp rosbag2_storage sensor_msgs std_msgs
+                   rclcpp rosbag2_cpp rosbag2_storage sensor_msgs std_msgs
                    tf2 tf2_msgs tf2_ros)
   find_package(${dependency} REQUIRED)
 endforeach()
@@ -87,7 +87,7 @@ ament_target_dependencies(grid_map_standalone_test
 add_executable(observation_planner_node src/nodes/observation_planner_node.cpp)
 target_link_libraries(observation_planner_node plan_env nlohmann_json::nlohmann_json)
 ament_target_dependencies(observation_planner_node
-  geometry_msgs nav2_msgs rclcpp rclcpp_action sensor_msgs std_msgs tf2 tf2_ros)
+  geometry_msgs rclcpp sensor_msgs std_msgs tf2 tf2_ros)
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
@@ -97,9 +97,6 @@ if(BUILD_TESTING)
   ament_target_dependencies(grid_map_query_test pcl_conversions rclcpp)
   ament_add_gtest(esdf_test test/esdf_test.cpp)
   target_link_libraries(esdf_test plan_env_algorithms)
-  ament_add_gtest(nav2_navigation_test test/nav2_navigation_test.cpp)
-  target_include_directories(nav2_navigation_test PRIVATE src/nodes)
-  ament_target_dependencies(nav2_navigation_test nav2_msgs rclcpp rclcpp_action)
 endif()
 
 install(TARGETS plan_env plan_env_algorithms
@@ -123,3 +120,12 @@ if(bimax_msgs_FOUND)
   ament_export_dependencies(bimax_msgs)
 endif()
 ament_package()
+
+option(PLAN_ENV_BUILD_BENCHMARKS "Build deterministic mapping CPU benchmark" OFF)
+if(PLAN_ENV_BUILD_BENCHMARKS)
+  add_executable(mapping_benchmark test/mapping_benchmark.cpp)
+  target_include_directories(mapping_benchmark PRIVATE ${PCL_INCLUDE_DIRS})
+  target_link_libraries(mapping_benchmark plan_env ${PCL_LIBRARIES})
+  ament_target_dependencies(mapping_benchmark pcl_conversions rclcpp)
+  target_compile_definitions(mapping_benchmark PRIVATE PLAN_ENV_BENCHMARK_SOURCE_CACHE)
+endif()

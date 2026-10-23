@@ -29,6 +29,14 @@ struct GridMapTestAccess {
     return msg;
   }
 
+  static std::pair<int, int> threadLimits(GridMap &map) {
+    return {map.esdf_config_.omp_threads, map.low_esdf_config_.omp_threads};
+  }
+
+  static std::pair<bool, bool> localModes(GridMap &map) {
+    return {map.esdf_config_.local_update, map.low_esdf_config_.local_update};
+  }
+
   static uint64_t generation(GridMap &map) {
     std::lock_guard<std::recursive_mutex> lock(map.task_region_mutex_);
     return map.task_generation_;
@@ -86,6 +94,53 @@ protected:
 
   std::unique_ptr<GridMap> map_;
 };
+
+TEST_F(GridMapQueryTest, LocalUpdateAndTwoThreadDefaultsAndOverrides) {
+  GridMap defaults;
+  defaults.initMap(std::make_shared<rclcpp::Node>("local_defaults"));
+  EXPECT_EQ(std::make_pair(2, 2), GridMapTestAccess::threadLimits(defaults));
+  EXPECT_EQ(std::make_pair(true, true), GridMapTestAccess::localModes(defaults));
+  GridMap overrides;
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({rclcpp::Parameter("grid_map.esdf_local_update", false),
+                               rclcpp::Parameter("grid_map.low_esdf_local_update", true)});
+  overrides.initMap(std::make_shared<rclcpp::Node>("local_overrides", options));
+  EXPECT_EQ(std::make_pair(false, true), GridMapTestAccess::localModes(overrides));
+}
+
+TEST_F(GridMapQueryTest, EsdfThreadParametersApplyToBothLayers) {
+  GridMap other;
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({rclcpp::Parameter("grid_map.omp_threads", 1),
+                               rclcpp::Parameter("grid_map.low_omp_threads", 3)});
+  other.initMap(std::make_shared<rclcpp::Node>("map_thread_limit_test", options));
+  const auto limits = GridMapTestAccess::threadLimits(other);
+  EXPECT_EQ(1, limits.first);
+  EXPECT_EQ(3, limits.second);
+}
+
+TEST_F(GridMapQueryTest, LowRefreshPreservesCommittedHighAndFrozenSnapshots) {
+  EXPECT_FALSE(frame());
+  ASSERT_TRUE(frame());
+  const auto committed = map_->snapshot();
+  map_->captureEsdfFreezing();
+  // Saturate low evidence with the same ray. The high layer is already closed.
+  for (int i = 0; i < 8; ++i) EXPECT_FALSE(frame());
+  const auto refreshed = map_->snapshot();
+  EXPECT_NE(committed.get(), refreshed.get());
+  EXPECT_EQ(committed->version, refreshed->version);
+  EXPECT_EQ(committed->occupancy_probabilities, refreshed->occupancy_probabilities);
+  EXPECT_EQ(committed->occupancy_states, refreshed->occupancy_states);
+  ASSERT_EQ(committed->esdf_voxels.size(), refreshed->esdf_voxels.size());
+  for (std::size_t i = 0; i < committed->esdf_voxels.size(); ++i) {
+    EXPECT_FLOAT_EQ(committed->esdf_voxels[i].distance, refreshed->esdf_voxels[i].distance);
+  }
+  EXPECT_NE(committed->expanded_occupancy_probabilities,
+            refreshed->expanded_occupancy_probabilities);
+  EXPECT_TRUE(map_->hasEsdfFreezing());
+  // A retained immutable snapshot must not be modified during a low refresh.
+  EXPECT_EQ(committed->occupancy_probabilities, map_->snapshot()->occupancy_probabilities);
+}
 
 TEST_F(GridMapQueryTest, resolutionIsAvailableBeforeStartAndAfterStop) {
   GridMap other;

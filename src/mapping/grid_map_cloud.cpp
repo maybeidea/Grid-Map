@@ -65,7 +65,7 @@ bool GridMap::updateLowResolutionMap(const PreparedCloud &prepared) {
                                 low_grid_geometry_, low_occupancy_model_)) {
     return false;
   }
-  if (!low_esdf_volume_.compute(low_occupancy_voxels_, low_occupancy_model_)) {
+  if (!low_esdf_volume_.computeIfChanged(low_occupancy_voxels_, low_occupancy_model_)) {
     return false;
   }
   low_map_dirty_ = true;

@@ -152,17 +152,34 @@ bool GridMap::saveEsdfSnapshot(const std::string &output_dir,
 
 void GridMap::publishEsdfSnapshot() {
   auto next = std::make_shared<EsdfSnapshot>();
-  next->geometry = grid_geometry_;
-  next->tsdf_voxels = tsdf_volume_.voxels();
-  next->occupancy_voxels = occupancy_voxels_;
-  next->occupancy_probabilities.resize(occupancy_voxels_.size());
-  next->occupancy_states.resize(occupancy_voxels_.size());
-  for (size_t i = 0; i < occupancy_voxels_.size(); ++i) {
-    next->occupancy_probabilities[i] =
-        occupancy_model_.probability(occupancy_voxels_[i]);
-    next->occupancy_states[i] = occupancy_model_.state(occupancy_voxels_[i]);
+  std::shared_ptr<const EsdfSnapshot> previous;
+  {
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    previous = latest_esdf_snapshot_;
   }
-  next->esdf_voxels = esdf_volume_.voxels();
+  next->geometry = grid_geometry_;
+  if (!global_map_dirty_ && previous && previous->task_mapping_active &&
+      previous->occupancy_voxels.size() == occupancy_voxels_.size()) {
+    // High-layer data changes only at a station commit. Keep the public value
+    // snapshot API while avoiding exp/state recomputation on each low frame.
+    next->tsdf_voxels = previous->tsdf_voxels;
+    next->occupancy_voxels = previous->occupancy_voxels;
+    next->occupancy_probabilities = previous->occupancy_probabilities;
+    next->occupancy_states = previous->occupancy_states;
+    next->esdf_voxels = previous->esdf_voxels;
+  } else {
+    next->tsdf_voxels = tsdf_volume_.voxels();
+    next->occupancy_voxels = occupancy_voxels_;
+    next->occupancy_probabilities.resize(occupancy_voxels_.size());
+    next->occupancy_states.resize(occupancy_voxels_.size());
+    for (size_t i = 0; i < occupancy_voxels_.size(); ++i) {
+      next->occupancy_probabilities[i] =
+          occupancy_model_.probability(occupancy_voxels_[i]);
+      next->occupancy_states[i] = occupancy_model_.state(occupancy_voxels_[i]);
+    }
+    next->esdf_voxels =
+        static_cast<const esdf::EsdfVolume &>(esdf_volume_).voxels();
+  }
   next->camera_position = camera_position_;
   {
     std::lock_guard<std::mutex> lock(motion_mutex_);
@@ -180,7 +197,8 @@ void GridMap::publishEsdfSnapshot() {
     next->expanded_occupancy_states[i] =
         low_occupancy_model_.state(low_occupancy_voxels_[i]);
   }
-  next->expanded_esdf_voxels = low_esdf_volume_.voxels();
+  next->expanded_esdf_voxels =
+      static_cast<const esdf::EsdfVolume &>(low_esdf_volume_).voxels();
   next->expanded_tsdf_enabled = low_tsdf_enabled_;
   next->esdf_current = esdf_initialized_ && esdf_current_;
   const TaskRegion &region = task_region_;

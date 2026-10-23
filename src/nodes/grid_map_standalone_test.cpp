@@ -185,14 +185,11 @@ public:
         [this](const std_msgs::msg::String::ConstSharedPtr message) {
           onTask(message->data);
         });
-    auto cloud_qos = rclcpp::QoS(10);
-    if (declare_parameter<bool>("grid_map.cloud_reliable", true)) {
-      cloud_qos.reliable();
-    } else {
-      cloud_qos.best_effort();
-    }
+    // Full-resolution stride=1 frames can contain hundreds of thousands of
+    // points. Use reliable delivery so large fragmented samples are not
+    // silently dropped by a best-effort sensor QoS profile.
     cloud_monitor_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-        cloud_topic_, cloud_qos,
+        cloud_topic_, rclcpp::QoS(10).reliable(),
         [this](const sensor_msgs::msg::PointCloud2::ConstSharedPtr message) {
           ++cloud_messages_total_;
           ++cloud_messages_for_task_;

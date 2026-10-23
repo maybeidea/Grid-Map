@@ -50,11 +50,15 @@ struct EsdfParameters {
   double roi_z_max = 0.50;
   double max_distance = 100000.0;
   bool signed_distance = true;
+  int omp_threads = 2;
+  bool local_update = true;
 
   esdf::EsdfConfig config(double ground_height) const {
     esdf::EsdfConfig result;
     result.unknown_is_occupied = unknown_mode != "off";
     result.signed_distance = signed_distance;
+    result.omp_threads = omp_threads;
+    result.local_update = local_update;
     result.max_distance = static_cast<float>(max_distance);
     if (unknown_mode != "all") {
       result.unknown_z_min = static_cast<float>(ground_height);
@@ -81,6 +85,10 @@ EsdfParameters readEsdf(const rclcpp::Node::SharedPtr &node,
       node, prefix + "esdf_max_distance", values.max_distance);
   values.signed_distance = declare_or_get_parameter(
       node, prefix + "esdf_signed_distance", values.signed_distance);
+  values.local_update = declare_or_get_parameter(
+      node, prefix + "esdf_local_update", values.local_update);
+  values.omp_threads = std::max(1, declare_or_get_parameter(
+      node, prefix + "omp_threads", values.omp_threads));
   return values;
 }
 
@@ -94,16 +102,11 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node) {
     return;
   }
   loadParameters();
-  const bool cloud_reliable = declare_or_get_parameter(
-      node_, "grid_map.cloud_reliable", true);
-  auto cloud_qos = rclcpp::QoS(10);
-  if (cloud_reliable) {
-    cloud_qos.reliable();
-  } else {
-    cloud_qos.best_effort();
-  }
+  // Full-resolution depth frames are multi-megabyte fragmented DDS samples;
+  // reliable delivery prevents the best-effort sensor profile from dropping
+  // frames before the fusion queue sees them.
   cloud_sub_ = node_->create_subscription<sensor_msgs::msg::PointCloud2>(
-      cloud_topic_, cloud_qos,
+      cloud_topic_, rclcpp::QoS(10).reliable(),
       [this](const sensor_msgs::msg::PointCloud2::ConstSharedPtr cloud) {
         pointCloudCallback(cloud);
       });

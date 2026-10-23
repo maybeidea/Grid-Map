@@ -7,6 +7,9 @@
     # Fine task window / coarse expanded surroundings.
     grid_map.high_resolution: 0.01
     grid_map.low_resolution: 0.03
+    # Cap ESDF workers to leave CPU capacity for planning/control.
+    grid_map.omp_threads: 2
+    grid_map.esdf_local_update: true
     grid_map.map_size_z: 0.20
     grid_map.expansion_margin: 0.25
     # Larger leaves reduce point count and ray traversal cost.

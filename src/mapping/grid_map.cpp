@@ -84,7 +84,7 @@ bool GridMap::configureEsdf(const esdf::EsdfConfig &config) {
   // with this saved policy when the next task ROI is started.
   if (!std::isfinite(config.max_distance) || config.max_distance < 0.0f ||
       std::isnan(config.unknown_z_min) || std::isnan(config.unknown_z_max) ||
-      config.unknown_z_min > config.unknown_z_max) {
+      config.unknown_z_min > config.unknown_z_max || config.omp_threads < 1) {
     return false;
   }
   esdf_config_ = config;
@@ -96,7 +96,7 @@ bool GridMap::configureLowEsdf(const esdf::EsdfConfig &config) {
   if (task_region_.valid || !std::isfinite(config.max_distance) ||
       config.max_distance < 0.0f || std::isnan(config.unknown_z_min) ||
       std::isnan(config.unknown_z_max) ||
-      config.unknown_z_min > config.unknown_z_max) {
+      config.unknown_z_min > config.unknown_z_max || config.omp_threads < 1) {
     return false;
   }
   low_esdf_config_ = config;

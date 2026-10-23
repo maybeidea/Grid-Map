@@ -131,8 +131,7 @@ class Gemini336DepthScene(Node):
         points = ','.join('{"x":%.3f,"y":%.3f}' % point
                           for point in self.map_polygon)
         message = String()
-        message.data = '{"command":"start","frame_id":%s,"points":[%s]}' % (
-            json.dumps(self.map_frame), points)
+        message.data = '{"command":"start","frame_id":"map","points":[%s]}' % points
         self.task_pub.publish(message)
         self.task_sent = True
 

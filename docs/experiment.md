@@ -1,103 +1,16 @@
-# 仿真与实机独立测试
+# Gemini 336 深度点云实验
 
-## 统一入口
-
-```bash
-# 合成点云、TF、任务和模拟移动/擦拭回执
-ros2 launch plan_env mapping_test.launch.py mode:=sim use_rviz:=false
-
-# 外部相机、定位 TF 和已激活的 Nav2
-ros2 launch plan_env mapping_test.launch.py mode:=real use_rviz:=false \
-  cloud_topic:=/camera/depth/points motion_frame:=base_footprint \
-  navigate_action:=/navigate_to_pose output_dir:=/tmp/plan_env_real_run1
-```
-
-旧入口 `gemini336_mapping_experiment.launch.py` 转发到同一入口，默认仍为仿真。
-两种模式均启动观测规划节点和地图可视化/导出节点；两者各自持有 GridMap，会重复
-建图。导出来自独立节点，不能视为规划节点的同一份冻结快照。
-
-| 模式 | 默认配置 | 数据源与导航 | 任务结束 |
-|---|---|---|---|
-| `sim` | `gemini336_mapping_experiment.yaml` | 启动合成场景和评价器；场景响应观测点模拟移动 | 规划节点结束后关闭实验 |
-| `real` | `real_mapping_test.yaml` | 不启动合成场景/评价器；直接调用 Nav2 `NavigateToPose` | 节点保持运行，等待下一任务 |
-
-`params_file:=/absolute/path/config.yaml` 替换默认配置。YAML 支持 `/**` 公共参数
-以及节点名（也可加前导 `/`）的 `ros__parameters`，可使用点号参数名或嵌套字典。
-命令行覆盖参数优先于 YAML；`mode` 强制决定是否启用 Nav2 和结束后是否退出。
-
-可用 launch 参数：
-
-- `use_rviz`、`rviz_config`、`use_observation_planner`；关闭观测规划时，仿真自动采用固定站位序列。
-- `cloud_topic`、`cloud_reliable`、`map_frame`、`motion_frame`、`task_topic`、`navigate_action`：非空时覆盖 YAML。
-- `output_dir`：统一设置地图导出及仿真评价目录，默认仿真 `/tmp/plan_env_gemini336`、实机 `/tmp/plan_env_real`。
-- `record_bag`：非空时覆盖 YAML；默认仿真关闭、实机开启，点云和 TF 录制到 `output_dir/bag`。
-- `use_sim_time`：默认 `false`；合成场景使用系统时钟，不发布 `/clock`。只有外部提供 `/clock` 时才开启。
-
-安装式构建后修改源码 YAML/launch 需要重新构建/安装。每次实验建议指定新的
-`output_dir`，避免重启后同名地图版本文件覆盖。
-
-## 实机准备与任务接口
-
-先启动相机、定位和 Nav2。`plan_env` 不负责启动这些外部系统，也不启动擦拭执行器。
-固定坐标系默认 `map`，底盘运动坐标系默认 `base_footprint`，需要在点云时间戳处
-存在 `map <- 点云 header.frame_id` 和 `map <- base_footprint` 的 TF。
-地图从 Z=0 起，实机配置高度为 1.8 m，按现场修改高度、分辨率及任务范围。
-
-实机默认 `grid_map.cloud_reliable=false`，可接收 best-effort 或 reliable 点云；
-仿真默认 reliable，减少大点云丢包。相机发布 reliable 时可以显式开启 reliable 订阅。
-
-任务话题默认 `/area_designation`，类型 `std_msgs/msg/String`，订阅 QoS 为
-reliable + transient_local。以下多边形只是格式示例，坐标应替换为现场范围：
+## 启动与配置
 
 ```bash
-ros2 topic pub --once --qos-durability transient_local \
-  /area_designation std_msgs/msg/String \
-  "{data: '{\"command\":\"start\",\"frame_id\":\"map\",\"points\":[{\"x\":0.0,\"y\":0.0},{\"x\":1.0,\"y\":0.0},{\"x\":1.0,\"y\":1.0},{\"x\":0.0,\"y\":1.0}]}'}"
+ros2 launch plan_env gemini336_mapping_experiment.launch.py use_rviz:=false
 ```
 
-收到范围立即启动任务，没有单独的“设置范围后再启动”步骤。也支持 `polygon/clean`
-和 `run_complex_area_clean` JSON。任务坐标系必须与 `grid_map.frame_id` 一致，
-节点不对任务多边形做 TF 转换。新任务会重建任务地图并取消上一任务的导航。
+所有节点参数在 [gemini336_mapping_experiment.yaml](../config/gemini336_mapping_experiment.yaml)。`/**` 区块统一两套地图实例的配置，节点区块只保留各自参数。安装式构建后修改源码 YAML 需要重新构建/安装。
 
-停止任务（会取消正在执行或尚未返回接受结果的导航）：
+Launch 仅提供三个开关：`use_rviz=true`、`rviz_config=包内配置路径`、`use_observation_planner=true`。修改场景、帧率、采样步长和输出目录应编辑 YAML。关闭观测规划节点时，同时将场景节点的 `observation_planner_enabled` 改为 `false`，以采用固定站位序列。
 
-```bash
-ros2 topic pub --once --qos-durability transient_local \
-  /area_designation std_msgs/msg/String "{data: '{\"command\":\"stop\"}'}"
-```
-
-实机观测过程：当前位置静止融合达到配额 → 规划/发布观测点 → 调用 Nav2 →
-Nav2 成功且 TF 位置在到达容差内、站位地图提交完成 → 继续评估。
-`/complex_area_plan/observation_target` 继续发布 `PoseStamped` 供查看，实机模式已由
-规划节点直接发送 action，不能再另外启动一个订阅该话题并重复下发导航的桥接器。
-
-导航沿用 `cleaning/orchestrator.py` 的异步模式：`NavigateToPose.Goal.pose` 使用
-地图坐标系和目标朝向，`behavior_tree` 留空以采用 Nav2 默认配置。服务器等待超时
-默认 5 s，目标接受/执行总超时默认 120 s；拒绝、取消、失败或超时会停止观测规划，
-发布 `navigation_failed:<原因>`，不自动重试。旧任务的延迟回调不能推进新任务。
-导航失败后独立导出节点仍可继续采集；若要一并停止采集，发送上述 stop 任务。
-
-查看状态：
-
-```bash
-ros2 topic echo /complex_area_plan/observation_state
-ros2 topic echo /grid_map/mapping_status
-```
-
-达到可擦条件后发布 `/complex_area_plan/wipe_request`，冻结规划节点地图并等待
-`/complex_area_plan/wipe_complete` 的 `Bool(true)`。实机不自动发送此回执。
-独立测试中确认本轮结束后，可手动模拟回执：
-
-```bash
-ros2 topic pub --once /complex_area_plan/wipe_complete std_msgs/msg/Bool '{data: true}'
-```
-
-## 仿真调试
-
-场景、帧率、采样步长等参数在 YAML 中配置。初次验证可将 `publish_rate` 调为
-`1.0`、`pixel_stride` 调为 `8`，确认地图提交后再恢复默认 `5 Hz`、步长 `2`。
-每站位 `frames_per_observation=10`，`wait_for_fusion=true`，切站等待
-`/grid_map/mapping_status` 的提交状态。
+初次验证可将 `publish_rate` 调为 `1.0`、`pixel_stride` 调为 `8`。确认有地图提交和观测状态后，再逐步恢复默认 `5 Hz`、步长 `2`。每站位 `frames_per_observation=10`，默认 `wait_for_fusion=true`，切站等待 `/grid_map/mapping_status` 的提交状态。
 
 ## 场景与数据流
 
@@ -120,9 +33,18 @@ ros2 topic pub --once /complex_area_plan/wipe_complete std_msgs/msg/Bool '{data:
 
 ## 输出与指标
 
-输出目录由 launch 的 `output_dir` 统一设置，不会自动创建 run_id 子目录。
+默认输出目录固定为 `/tmp/plan_env_gemini336`，不会自动创建 run_id 子目录。需要分组比较时，同时修改独立节点的 `visualization_dir` 和评价节点的 `output_dir`。
 
-每个高层版本可导出高度分类 PPM、交互占用图 HTML、体素数据 JSON、float32 距离场和 `versions_3d.csv`。PPM 是高度分类图，不是连续高度值；JSON 的 `occupancy_state` 字段为原始三态占据（字符 0=自由、1=占用、2=未知），`occupancy` 则按 ESDF 距离派生，可能包含作为障碍处理的未知区域。评价节点生成 `metrics.csv`、`metrics.json`：
+每个高层版本可导出高度分类 PPM、交互地图 HTML、体素数据 JSON、float32 距离场和 `versions_3d.csv`。
+
+直接用浏览器打开 `map_v<版本>_esdf3d.html`，无需联网。页面沿用 `test/visualize_round_coverage.py` 的深蓝主题、指标卡片和图例配色：
+
+- `ESDF 3D` 按实际高度渐变显示 ESDF 距离 ≤ 0 的体素，叠加任务 ROI 和米制坐标网格；`HeightMap` 切换为六类高度状态俯视图，PPM 使用相同分类配色。
+- 左侧显示体素数量、占用已知率、高度图已观测比例和 ESDF 是否复用；右侧显示图层开关、点大小和图例。已知率由原始占用状态计算，与 ESDF 体素数量分别标注。
+- 拖动旋转，Shift/右键拖动平移，滚轮缩放；支持 Top / Front / Side、自动旋转、复位和 `Save PNG` 导出当前地图视图。高度图模式拖动平移。
+- 三维显示均匀抽样至最多 30,000 个点，指标和 JSON 保留完整数据。JSON 新增 `roi`、行优先的 `heightmap` 和 `esdf_current` 字段。
+
+评价节点生成 `metrics.csv`、`metrics.json`：
 
 - `occupied_iou`：预测占用与障碍真值的交并比，未知障碍影响并集。
 - `free_space_precision`：预测自由空间的正确比例。

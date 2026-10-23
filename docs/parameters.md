@@ -23,7 +23,6 @@
 | 名称 | 默认值 | 用途 |
 |---|---:|---|
 | `cloud_min_range` | 0.2 | 相机坐标系内最小距离 |
-| `cloud_reliable` | true | reliable 点云订阅；实机配置为 false，以兼容 best-effort 相机 |
 | `local_update_range_x/y/z` | 5.0 / 5.0 / 3.0 | 相机坐标系各轴绝对范围 |
 | `cloud_min_map_z` | 0.02 | 地图坐标系障碍端点最低高度 |
 | `cloud_low_z_clear_rays` | false | 保留低 Z 回波的 miss 射线，不将端点作为障碍 |
@@ -45,11 +44,13 @@
 | `esdf_roi_z_max` | 0.50 | 未知障碍高度带上界；已知障碍不受此高度限制 |
 | `esdf_signed_distance` | true | 在障碍体素中输出负距离 |
 | `esdf_max_distance` | 100000.0 | 无障碍源时距离与距离截断上限 |
+| `esdf_local_update` | true | 按障碍源变化增量更新受影响的 Z/Y/X 行，保持全局精确距离；false 回退全图重算 |
+| `omp_threads` | 2 | 每张 ESDF 的 OpenMP 线程上限；小图自动减少线程，不修改进程全局设置 |
 | `esdf_recompute_change_voxels` | 128 | 高层累计占用状态变化达到阈值后重算；0 为每次提交重算 |
 | `tsdf.enabled` | false | 开启高层 TSDF；碰撞查询仍使用占用和 ESDF |
 | `tsdf.truncation_distance` | 0.05 | TSDF 表面截断带 |
 
-低层可独立覆盖 `low_p_hit/miss/min/max/occ`、`low_esdf_unknown_mode`、`low_esdf_roi_z_max`、`low_esdf_signed_distance`、`low_esdf_max_distance`，默认继承对应高层参数。`low_tsdf.enabled=false`、`low_tsdf.truncation_distance=0.05` 独立配置。低层 ESDF 始终随有效帧重算。
+低层可独立覆盖 `low_p_hit/miss/min/max/occ`、`low_esdf_unknown_mode`、`low_esdf_roi_z_max`、`low_esdf_signed_distance`、`low_esdf_max_distance`、`low_esdf_local_update`、`low_omp_threads`，默认继承对应高层参数。`low_tsdf.enabled=false`、`low_tsdf.truncation_distance=0.05` 独立配置。低层每个有效帧检查二值障碍源，仅在源变化时局部更新受影响的距离变换行；未知空间策略与高度带也参与源判断。概率仍每帧融合和发布，复用距离场不引入过期数据。高层达到原有 `esdf_recompute_change_voxels` 提交阈值时也使用局部更新；未达到阈值时仍按原设计标记 `esdf_current=false`。首次计算、重配置或可写距离访问后建立完整中间缓存。详见 [局部更新](local_updates.md)。ROS 参数 `omp_threads` / `low_omp_threads` 小于 1 时按 1 处理；直接 C++ 配置要求至少 1。
 
 ROS 概率默认值经 Log-odds 转换；直接使用算法类的 `LogOddsConfig` 是较宽松的独立默认模型。库内直接配置时以算法头文件为准，勿把概率直接写入 `*_log_odds` 字段。
 
@@ -98,8 +99,6 @@ ROS 概率默认值经 Log-odds 转换；直接使用算法类的 `LogOddsConfig
 | `max_stations_per_round` / `max_rounds` | 5 / 3 | 每轮站位上限和任务轮次上限 |
 | `arrival_tolerance` | 0.15 | 目标到达容差 |
 | `tick_period_ms` | 100 | 编排周期，最低 20 ms |
-| `navigation_enabled` | false | 直接调用 Nav2；统一入口实机强制开启，仿真关闭 |
-| `exit_on_complete` | false | 完成后退出节点；统一入口仿真开启，实机关闭 |
 | `wipe_z_min/max` | 0.02 / 0.20 | 擦拭评估高度带 |
 | `arm_reach` / `arm_entry_depth` | 0.85 / 0.25 | 可达半径与简化伸入检查深度 |
 | `opening_width` | 0.12 | 开口所需宽度 |
@@ -111,13 +110,3 @@ ROS 概率默认值经 Log-odds 转换；直接使用算法类的 `LogOddsConfig
 | `max_candidates` | 64 | 候选站位数上限 |
 
 任务格式、状态机与擦拭回执见 [观测规划](observation_planning.md)。
-
-Nav2 参数不带 `observation.` 前缀，与 `cleaning/orchestrator.py` 的命名一致：
-
-| 名称 | 默认值 | 用途 |
-|---|---|---|
-| `navigate_action` | `/navigate_to_pose` | `nav2_msgs/action/NavigateToPose` 服务名 |
-| `action_server_timeout` | 5.0 | 等待 action server 的秒数 |
-| `nav_timeout` | 120.0 | 发送目标后等待接受及执行结果的总秒数 |
-
-两个超时值必须有限且大于零，使用单调时钟，不受 ROS 时间跳变影响。

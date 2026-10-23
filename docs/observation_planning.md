@@ -40,9 +40,8 @@
 
 `observation_planner_node` 只在快照的
 `mapping_status.motion_state == kReadyToMove` 且 `ready_to_move == true` 时选择并
-发布目标。仿真中，非当前位置的目标发布后必须观察到 `kMoving`；实机 Nav2 模式
-必须收到导航成功结果。两种模式都要求机器人位于目标附近、当前站位达到
-`kReadyToMove`，才会把这一站标记为已观测。这保证了一个位置的局部地图达到
+发布目标。目标发布后必须观察到 `kMoving`，并且机器人回到目标附近、当前站位重新
+达到 `kReadyToMove`，才会把这一站标记为已观测。这保证了一个位置的局部地图达到
 驻留帧配额并提交到全局地图后才移动到下一位置。
 
 完整后节点调用 `freezeOccupancyAndEsdf()`，发布擦拭请求并暂停新的观测；收到擦拭
@@ -56,15 +55,8 @@
 构建 `plan_env` 后启动：
 
 ```bash
-ros2 launch plan_env mapping_test.launch.py mode:=sim
-# 实机：外部相机、TF 和 Nav2 已启动
-ros2 launch plan_env mapping_test.launch.py mode:=real
+ros2 run plan_env observation_planner_node
 ```
-
-统一入口同时启动地图导出节点。实机导航使用与 `cleaning/orchestrator.py` 相同的
-异步 `NavigateToPose` 接口，包含服务等待、执行超时、失败处理和旧回调隔离。
-停止任务或替换任务会取消旧导航；实机任务完成后继续等待新任务。
-参数、输入示例和导出格式见 [独立测试](experiment.md)。
 
 任务输入沿用 `orchestrator.py` 的 `polygon/clean`、`run_complex_area_clean` 或
 简化 `start` JSON，默认订阅 `/area_designation`。擦拭执行器应订阅
@@ -83,3 +75,4 @@ ros2 launch plan_env mapping_test.launch.py mode:=real
 当前节点是独立编排入口，使用自己的 `GridMap` 点云订阅。已有上层编排器可以直
 接复用 `ObservationPlanner`，或者把同样的三个状态事件（目标发布、地图提交、擦拭
 完成）接到现有 action 状态机中。
+
